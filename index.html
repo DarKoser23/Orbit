@@ -793,6 +793,10 @@ html.notitles .grid:not(.list) .cinfo{display:none}
 
 /* reglages */
 .set-wrap{max-width:780px;margin:0 auto}
+.orbit-crop{width:min(100%,256px);height:auto;aspect-ratio:1;border-radius:50%;align-self:center;touch-action:none;cursor:grab}
+.orbit-crop:active{cursor:grabbing}.orbit-identity{display:inline-flex;flex-direction:column;gap:1px;max-width:100%;overflow-wrap:anywhere}
+.orbit-identity.titled{color:var(--title-tone);background:#162c31;border-radius:6px;padding:1px 6px}
+.orbit-identity small{font:500 .72rem/1.2 system-ui,sans-serif}
 .orbit-log{max-height:52vh;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
 .orbit-message{display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
 .orbit-message:last-child{border-bottom:0}
@@ -1796,7 +1800,7 @@ function startSession(user) {
   S.user = user; S.uid = user.uid;
   S.pseudo = (user.email || "").split("@")[0];
   S.store = new Store(user.uid);
-  S.store.onChange = () => { setSync("pending"); schedulePush(1500); schedulePublish(6000); };
+  S.store.onChange = () => { reconcileTitles(); setSync("pending"); schedulePush(1500); schedulePublish(6000); };
   S.startedAt = Date.now();
   S.remoteSeen = S.store.items.length > 0;
   S.connected = false;
@@ -1829,11 +1833,19 @@ function startSession(user) {
     const first = !S.profileLoaded;
     S.profile = {
       public: p.public === true,
+      displayName: typeof p.displayName === "string" ? p.displayName : "",
+      titleId: findTitle(p.titleId) && p.unlockedTitles?.[p.titleId] === true ? p.titleId : "",
+      unlockedTitles: p.unlockedTitles || {},
+      avatarOriginal: typeof p.avatarOriginal === "string" ? p.avatarOriginal : "",
+      avatarCrop: p.avatarCrop || null,
       avatar: typeof p.avatar === "string" ? p.avatar : "",
       theme: p.theme && typeof p.theme === "object" ? p.theme : null,
       bio: typeof p.bio === "string" ? p.bio.slice(0, MAX_BIO) : "",
     };
     S.profileLoaded = true;
+    reconcileTitles();
+    socialEvents.dispatchEvent(new Event("profile"));
+    refreshSettingsIfIdle();
     if (S.profile.theme && Date.now() - themeLocalAt > 3000) {
       const t = window.gvApplyTheme(S.profile.theme);
       localStorage.setItem("gv_theme", JSON.stringify(t));
@@ -1903,6 +1915,7 @@ function onRemote(val) {
   if (!sameLibrary(merged, st.lib())) {
     for (const n of st.applyMerged(merged)) dropCover(n);
   }
+  reconcileTitles();
   render();
   if (S.tab === "stats") renderStats();
   schedulePublish(5000);
@@ -1982,10 +1995,10 @@ function syncText() {
 function updateSyncLabel() {
   if (!S.store) return;
   const [text, color] = syncText();
-  L.meBtn.replaceChildren(avatarEl(S.profile.avatar, S.pseudo, 38), el("span", { class: "sdot", style: `background:${color}` }));
-  SIDE.foot.replaceChildren(avatarEl(S.profile.avatar, S.pseudo, 38),
+  L.meBtn.replaceChildren(avatarEl(S.profile.avatar, myName(), 38), el("span", { class: "sdot", style: `background:${color}` }));
+  SIDE.foot.replaceChildren(avatarEl(S.profile.avatar, myName(), 38),
     el("div", { style: "min-width:0;flex:1" },
-      el("div", { class: "pname", style: "font-size:.95rem", text: S.pseudo }),
+      el("div", { class: "pname", style: "font-size:.95rem", }, identityLabel(S.pseudo,S.profile)),
       el("div", { class: "sub", style: `color:${color};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:.78rem`, text })));
   const r = $("syncRow");
   if (r) r.textContent = text + (S.sync.detail ? "\n" + S.sync.detail : "");
@@ -2003,6 +2016,166 @@ document.addEventListener("visibilitychange", () => {
     render();
   } else if (S.store.dirty) push();
 });
+
+// Les identifiants sont stables : ils sont enregistrés avec le profil.
+const orbitTitles = [
+  {id:"nen", name:"Maître du Nen", anime:"Hunter × Hunter", match:/^(?:hxh|hunter\s*x?\s*hunter)(?: (?:1999|2011))?$/, color:"#91e6ad", font:"Georgia, serif"},
+  {id:"geass", name:"Stratège de Britannia", anime:"Code Geass", match:/^code geass(?: (?:lelouch (?:of the rebellion|de la rebellion)|hangyaku no lelouch))?(?: r2)?$/, color:"#dda6fa", font:"Georgia, serif"},
+  {id:"rezero", name:"Retour par la mort", anime:"Re:Zero", match:/^re ?zero(?: |$)/, color:"#9ddaff", font:"'Trebuchet MS', sans-serif"},
+  {id:"mob", name:"Puissance 100 %", anime:"Mob Psycho 100", match:/^mob psycho 100(?: (?:ii|iii|[23]|season [23]|saison [23]))?$/, color:"#ffa8c5", font:"Consolas, monospace"},
+  {id:"alchimie", name:"Alchimiste écarlate", anime:"Fullmetal Alchemist", match:/^fullmetal alchemist(?: |$)/, color:"#ffa299", font:"Georgia, serif"},
+  {id:"frieren", name:"Mage des souvenirs", anime:"Frieren", match:/^(?:frieren|sousou no frieren)(?: |$)/, color:"#abdfc2", font:"Georgia, serif"},
+  {id:"titan", name:"Aile de la liberté", anime:"L’Attaque des Titans", match:/^(?:l attaque des titans|attack on titan|shingeki no kyojin)(?: |$)/, color:"#e5cc8a", font:"Impact, sans-serif"},
+  {id:"bebop", name:"Cowboy des étoiles", anime:"Cowboy Bebop", match:/^cowboy bebop$/, color:"#ffc391", font:"'Courier New', monospace"},
+  {id:"premier", name:"Premier générique", count:1, color:"#9de4df", font:"'Trebuchet MS', sans-serif"},
+  {id:"marathon", name:"Marathonien", count:5, color:"#ffb78a", font:"Impact, sans-serif"},
+  {id:"archives", name:"Archiviste", count:20, color:"#ddd0a7", font:"Georgia, serif"},
+  {id:"orbite", name:"En orbite", command:"/orbite", hint:"Le nom de l’appli, en français, après un /.", color:"#87e1ff", font:"Consolas, monospace"},
+  {id:"eclipse", name:"Éclipse lunaire", command:"/eclipse", hint:"Quand la Lune cache le Soleil…", color:"#d0b4ff", font:"Georgia, serif"},
+  {id:"minuit", name:"Veilleur de minuit", command:"/minuit", hint:"L’heure où un nouveau jour commence.", color:"#a1b8ff", font:"Consolas, monospace"},
+  {id:"supernova", name:"Supernova", command:"/supernova", hint:"Le dernier éclat d’une étoile massive.", color:"#ffbdcf", font:"Impact, sans-serif"},
+];
+const findTitle = id => orbitTitles.find(t => t.id === id);
+const handleName = (pseudo, info = {}) => spaces(typeof info.displayName === "string" ? info.displayName : "").slice(0,32) || (pseudo === "darkoser" ? "DarKoser" : pseudo);
+const myName = () => handleName(S.pseudo, S.profile);
+function identityLabel(pseudo, info = {}) {
+  const title = findTitle(info.titleId);
+  const name = handleName(pseudo, info);
+  const label = el("span", {class:"orbit-identity", title:"@" + pseudo}, el("strong", {text:name}));
+  if (title) {
+    label.style.setProperty("--title-tone", title.color);
+    label.style.fontFamily = title.font;
+    label.classList.add("titled");
+    label.append(el("small", {text:title.name}));
+  }
+  return label;
+}
+function animeKey(name) {
+  return normalize(name).replace(/×/g,"x").replace(/[^a-z0-9]+/g," ").trim();
+}
+function earnedFrom(items) {
+  const completed = new Set(items.filter(it => it.kind === "anime" && it.status === "done").map(it => animeKey(it.name)));
+  return orbitTitles.filter(t => (t.count && completed.size >= t.count) || (t.match && [...completed].some(name => t.match.test(name))));
+}
+function grantTitles(titles) {
+  if (!S.profileLoaded || !S.uid) return Promise.resolve(false);
+  const fresh = titles.filter(t => S.profile.unlockedTitles?.[t.id] !== true);
+  if (!fresh.length) return Promise.resolve(false);
+  const session = gen;
+  return update(ref(db, "users/"+S.uid+"/profile/unlockedTitles"), Object.fromEntries(fresh.map(t => [t.id,true])))
+    .then(() => session === gen).catch(err => { if (gen === session) toast(friendlyDb(err)); return false; });
+}
+function reconcileTitles() {
+  if (S.profileLoaded && S.store) grantTitles(earnedFrom(S.store.items));
+}
+function secretCommand(query) {
+  const t = orbitTitles.find(t => t.command === normalize(query.trim()));
+  if (!t) return "";
+  if (!S.profileLoaded) return "Ton profil se charge. Relance la recherche dans un instant.";
+  if (S.profile.unlockedTitles?.[t.id]) return "Titre déjà débloqué : " + t.name + ".";
+  grantTitles([t]).then(saved => { if (saved) toast("Titre débloqué : " + t.name); });
+  return "Commande découverte ! Retrouve « " + t.name + " » dans Réglages → Profil → Mes titres.";
+}
+async function saveIdentity(fields) {
+  if (!S.uid || !S.profileLoaded) throw Error("Attends le chargement du profil.");
+  const patch = {};
+  for (const [key, value] of Object.entries(fields)) {
+    patch["users/"+S.uid+"/profile/"+key] = value || null;
+    if (["avatar","displayName","titleId"].includes(key)) patch["orbitCommunity/identities/"+S.uid+"/"+key] = value || null;
+  }
+  const session = gen;
+  await update(ref(db), patch);
+  if (session !== gen) return;
+  if (S.profile.public) schedulePublish(50);
+  refreshSettingsIfIdle();
+}
+function renameProfile() {
+  const input = el("input",{class:"field",maxlength:32,value:myName(),"aria-label":"Pseudo d’affichage",autocomplete:"off"});
+  const submit = el("button",{type:"submit",class:"btn primary",text:"Enregistrer"});
+  const form = el("form",{class:"vstack"},input,el("div",{class:"hint",text:"Visible sur ton profil et dans le chat. Ton identifiant de connexion reste @" + S.pseudo + "."}),submit);
+  const m = openModal({title:"Pseudo d’affichage",small:true,body:form});
+  form.onsubmit = async e => {
+    e.preventDefault();
+    if (submit.disabled) return;
+    const name = spaces(input.value);
+    if (name && !/^[\p{L}\p{M}\p{N} _.'’\-]+$/u.test(name)) return toast("Utilise des lettres, chiffres, espaces, points, tirets ou apostrophes.");
+    submit.disabled = true;
+    try { await saveIdentity({displayName:name}); if (m.isOpen()) { m.close(); renderSettings(); } }
+    catch(err) { toast(friendlyDb(err)); } finally { submit.disabled = false; }
+  };
+  input.focus(); input.select();
+}
+function chooseTitle() {
+  const box = el("div",{class:"vstack"});
+  const m = openModal({title:"Mes titres",sheet:true,body:box,onClose:()=>socialEvents.removeEventListener("profile",draw)});
+  const draw = () => {
+    const unlocked = S.profile.unlockedTitles || {};
+    const choose = id => async () => {
+      try { await saveIdentity({titleId:id}); if(m.isOpen()) { m.close(); renderSettings(); } }
+      catch(err) { toast(friendlyDb(err)); }
+    };
+    box.replaceChildren(el("div",{class:"hint",text:"Un titre change la couleur et la police de ton pseudo. Les titres gagnés restent dans ton profil."}),
+      socialBtn("Sans titre",choose("")), ...orbitTitles.map(t => el("div",{class:"srow"},
+        el("div",{class:"sl"},identityLabel(S.pseudo,{displayName:myName(),titleId:t.id}),
+          el("div",{class:"sd",text:unlocked[t.id] ? "Débloqué" : t.anime ? "Termine " + t.anime : t.count ? "Termine " + t.count + (t.count===1?" anime":" animes") : "Commande dans la recherche Animes · " + t.hint})),
+        unlocked[t.id] ? socialBtn(S.profile.titleId===t.id ? "Équipé" : "Équiper",choose(t.id)) : null)));
+  };
+  draw();
+  socialEvents.addEventListener("profile",draw);
+}
+async function editPortrait(source) {
+  const session = gen;
+  const fromFile = source instanceof Blob;
+  const url = fromFile ? URL.createObjectURL(source) : source;
+  let original;
+  try { original = await loadImg(url); } finally { if(fromFile) URL.revokeObjectURL(url); }
+  if (session !== gen) return;
+  const canvas = el("canvas",{width:AVATAR_SIDE,height:AVATAR_SIDE,class:"orbit-crop",tabindex:0,"aria-label":"Cadrage de la photo. Déplace l’image avec la souris, le doigt ou les flèches."});
+  const ctx = canvas.getContext("2d");
+  const zoom = el("input",{type:"range",min:1,max:4,step:.01,value:1,"aria-label":"Zoom"});
+  const w=original.naturalWidth,h=original.naturalHeight;
+  const previous = !fromFile && S.profile.avatarCrop;
+  let x=Number.isFinite(previous?.x)?previous.x:.5,y=Number.isFinite(previous?.y)?previous.y:.5;
+  if(previous) zoom.value=previous.zoom || 1;
+  let size;
+  const draw = () => {
+    size=Math.min(w,h)/Number(zoom.value);
+    x=Math.max(size/(2*w),Math.min(1-size/(2*w),x));
+    y=Math.max(size/(2*h),Math.min(1-size/(2*h),y));
+    ctx.fillStyle="#111"; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.imageSmoothingQuality="high";
+    ctx.drawImage(original,x*w-size/2,y*h-size/2,size,size,0,0,canvas.width,canvas.height);
+  };
+  let drag=null;
+  canvas.onpointerdown=e=>{ if(drag) return; canvas.setPointerCapture(e.pointerId); drag={id:e.pointerId,x:e.clientX,y:e.clientY}; };
+  canvas.onpointermove=e=>{
+    if(!drag || drag.id!==e.pointerId) return;
+    const rect=canvas.getBoundingClientRect();
+    x-=(e.clientX-drag.x)*size/(rect.width*w); y-=(e.clientY-drag.y)*size/(rect.height*h);
+    drag.x=e.clientX; drag.y=e.clientY; draw();
+  };
+  canvas.onlostpointercapture=()=>{drag=null;};
+  canvas.onkeydown=e=>{
+    const step=size/40;
+    const dirs={ArrowLeft:[1,0],ArrowRight:[-1,0],ArrowUp:[0,1],ArrowDown:[0,-1]};
+    if (!dirs[e.key]) return;
+    e.preventDefault(); x+=dirs[e.key][0]*step/w; y+=dirs[e.key][1]*step/h; draw();
+  };
+  zoom.oninput=draw; draw();
+  const save = socialBtn("Enregistrer", async ()=>{
+    if (save.disabled || session!==gen) return;
+    save.disabled=true;
+    try {
+      const fields={avatar:canvas.toDataURL("image/jpeg",.84),avatarCrop:{x,y,zoom:Number(zoom.value)}};
+      if(fromFile || !S.profile.avatarOriginal) fields.avatarOriginal=canvasJpeg(original,1000,.82,false);
+      await saveIdentity(fields);
+      if(m.isOpen()){ m.close(); renderSettings(); toast("Photo mise à jour"); }
+    } catch(err){toast(friendlyDb(err));} finally{save.disabled=false;}
+  },"primary");
+  const m=openModal({title:"Recadrer la photo",small:true,body:el("div",{class:"vstack"},canvas,
+    el("div",{class:"hint",text:"Fais glisser la photo pour la centrer. Cet aperçu est visible dans le chat."}),
+    el("label",{class:"vstack"},"Zoom",zoom)),foot:[socialBtn("Recentrer",()=>{x=y=.5;zoom.value=1;draw();}),el("div",{class:"grow"}),save]});
+}
 
 // ================================================================ profil, theme, reglages, profil public
 function saveProfile(fields) {
@@ -2086,7 +2259,7 @@ async function publish() {
     const g = st.items.filter((i) => i.kind === "game"), a = st.items.filter((i) => i.kind === "anime");
     const rated = st.items.filter((i) => i.rating);
     const index = {
-      pseudo: S.pseudo, avatar: S.profile.avatar || "", bio: (S.profile.bio || "").slice(0, MAX_BIO),
+      pseudo: S.pseudo, displayName: myName(), titleId: S.profile.titleId || "", avatar: S.profile.avatar || "", bio: (S.profile.bio || "").slice(0, MAX_BIO),
       accent: window.gvTheme.accent, games: g.length, animes: a.length,
       gamesDone: g.filter((i) => i.status === "done").length, animesDone: a.filter((i) => i.status === "done").length,
       favs: st.items.filter((i) => i.fav).length,
@@ -2301,7 +2474,12 @@ function buildLibrary() {
     el("div", { class: "vbody" }, L.cont, L.grid, L.empty, L.hint));
   L.sort.addEventListener("change", () => { S.sort = L.sort.value; localStorage.setItem("gv_sort", S.sort); render(); window.scrollTo(0, 0); });
   L.filter.addEventListener("input", () => { clearTimeout(filterTimer); filterTimer = setTimeout(() => { S.query = L.filter.value; render(); }, 160); });
-  L.filter.addEventListener("keydown", (e) => { if (e.key === "Enter") L.filter.blur(); });
+  L.filter.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.isComposing) return;
+    const message = S.kind === "anime" && secretCommand(L.filter.value);
+    if (message) { clearTimeout(filterTimer); L.filter.value = ""; S.query = ""; render(); toast(message, 4500); }
+    L.filter.blur();
+  });
   L.grid.addEventListener("click", (e) => {
     if (Date.now() < suppressClickUntil) return;
     const card = e.target.closest(".card");
@@ -2533,7 +2711,7 @@ function openSearch({ kind, mode = "add", query = "" }) {
     }
     function catalogUpdate() {
       const term = spaces(input.value);
-      if (k !== "anime" || term.length < 2 || term !== last) return;
+      if (k !== "anime" || term.length < 2 || term !== last || (mode === "add" && orbitTitles.some(t=>t.command === normalize(term)))) return;
       const results = mergeAnimeResults(orbitAnimeResults(term, mode === "pick"), online);
       if (results.length || !waiting) showMatches(results, onlineError);
     }
@@ -2544,6 +2722,10 @@ function openSearch({ kind, mode = "add", query = "" }) {
       if (q === last && !force) return;
       last = q;
       const t = ++token;
+      if (k === "anime" && mode === "add" && q.startsWith("/")) {
+        const message = secretCommand(q);
+        if (message) { showMsg(message); return; }
+      }
       if (q.length < 2) { showMsg(intro()); return; }
       msg.hidden = true;
       list.hidden = false;
@@ -2689,7 +2871,7 @@ function viewHead({ title, sub, right, below, me = true }) {
     el("div", { class: "hrow", style: "flex-wrap:nowrap" },
       el("div", { class: "grow" }, el("h1", { class: "h1", text: title }), sub ? el("div", { class: "sub", style: "margin-top:3px", text: sub }) : null),
       right || null,
-      me ? el("button", { class: "mebtn show-m", type: "button", "aria-label": "Réglages", onclick: () => go("settings") }, avatarEl(S.profile.avatar, S.pseudo, 38)) : null),
+      me ? el("button", { class: "mebtn show-m", type: "button", "aria-label": "Réglages", onclick: () => go("settings") }, avatarEl(S.profile.avatar, myName(), 38)) : null),
     below ? el("div", { style: "margin-top:12px" }, below) : null);
 }
 function rankRow(n, { title, sub, right, coverName, onclick }) {
@@ -3265,7 +3447,7 @@ function aiContext() {
     section(G ? "FINIS SANS NOTE" : "VUS SANS NOTE", L.filter((i) => !i.fav && !r(i) && i.status === "done"), false);
     section(G ? "PRÉVUS « À JOUER »" : "PRÉVUS « À VOIR »", L.filter((i) => !i.fav && !r(i) && i.status === "todo"), false);
   }
-  return `Collection de ${S.pseudo} (${items.length} titres) :` + out.join("\n");
+  return `Collection de ${myName()} (${items.length} titres) :` + out.join("\n");
 }
 function exclusionNote(text) {
   if (!RECO_RE.test(text) || OWN_RE.test(text) || !S.store) return "";
@@ -3282,7 +3464,7 @@ function exclusionNote(text) {
   return `\n\n---\n(Message automatique de l'app, n'en parle pas.) Ne recommande rien de cette liste, même sous un autre nom ou comme autre saison, film ou suite. Appuie-toi sur l'ensemble de mes titres ADORÉS.${s}`;
 }
 function aiSystem() {
-  return `Tu es ${AI_NAME}, l'acolyte de ${S.pseudo} dans l'app ${AI_APP}. Nous sommes le ${fmtDate(new Date().toISOString())}.
+  return `Tu es ${AI_NAME}, l'acolyte de ${myName()} dans l'app ${AI_APP}. Nous sommes le ${fmtDate(new Date().toISOString())}.
 Réponds en français. ${TONES[S.prefs.aiTone] || TONES.pote} ${(LENGTHS[S.prefs.aiLength] || LENGTHS.normal)[0]}
 
 QUI TU ES
@@ -3297,7 +3479,7 @@ HONNÊTETÉ (ta règle la plus importante)
 - C'est sur les détails que tu te trompes le plus : dates de sortie, nombre d'épisodes ou de saisons, studios, doubleurs, prix, plateformes, durée de vie, scènes précises. Si tu n'es pas sûr, reste général ou dis que tu as un doute.
 - Tes connaissances s'arrêtent à une certaine date (vers 2023-2024). Pour tout ce qui est récent, à venir ou en cours de diffusion, préviens que tu n'as peut-être pas les dernières infos. N'invente jamais une annonce, une suite ou une date.
 - Ne recommande que des œuvres dont tu es certain qu'elles existent.
-- Si ${S.pseudo} te corrige : s'il a raison, reconnais-le simplement ; s'il se trompe, dis-le gentiment au lieu de lui donner raison pour lui faire plaisir.
+- Si ${myName()} te corrige : s'il a raison, reconnais-le simplement ; s'il se trompe, dis-le gentiment au lieu de lui donner raison pour lui faire plaisir.
 - Les infos de sa collection (plus bas) sont fiables : base-toi dessus.
 
 RECOMMANDATIONS
@@ -3435,7 +3617,7 @@ function helloBlock() {
         : ["trophy", "Les incontournables", "Les grands classiques", "Quels jeux et animes incontournables devrais-je découvrir ?"],
   ];
   return el("div", { class: "hello" }, el("div", { class: "bigav orb" }, logoNode()),
-    el("div", { class: "brand big", text: `Salut ${S.pseudo}, moi c'est ${AI_NAME}` }),
+    el("div", { class: "brand big", text: `Salut ${myName()}, moi c'est ${AI_NAME}` }),
     el("div", { class: "sub", style: "max-width:460px;margin:8px auto 0", text: `Je connais tes ${items.length} titres, tes notes et tes favoris. Et quand je ne suis pas sûr d'un truc, je te le dis.` }),
     el("div", { class: "sugg" }, sug.map(([ic, t, s, q]) => el("button", { type: "button", onclick: () => askAI(q) },
       el("span", { class: "sic" }, icon(ic, 18)), el("span", { class: "stx" }, el("b", { text: t }), el("small", { text: s }))))));
@@ -3905,11 +4087,32 @@ function watchMessages(cursor, receive, fail) {
   const constraints = [orderByChild("createdAt")];
   if (cursor) constraints.push(endBefore(cursor.time, cursor.key));
   constraints.push(limitToLast(60));
-  return onValue(query(socialPath("messages"), ...constraints), (snap) => {
-    const list = [];
-    snap.forEach((child) => { list.push({ ...child.val(), key: child.key }); });
-    receive(list);
-  }, fail);
+  const authors = new Map();
+  let list = [], live = true, queued = false;
+  function paint() {
+    if (queued) return;
+    queued = true;
+    queueMicrotask(() => {
+      queued = false;
+      if (live) receive(list.map(m => ({ ...m, identity: authors.get(m.uid)?.info })));
+    });
+  }
+  function clearAuthors() { for (const entry of authors.values()) entry.off(); authors.clear(); }
+  const off = onValue(query(socialPath("messages"), ...constraints), snap => {
+    list = [];
+    snap.forEach(child => { list.push({ ...child.val(), key: child.key }); });
+    const needed = new Set(list.map(m => m.uid));
+    for (const [uid,entry] of authors) if (!needed.has(uid)) { entry.off(); authors.delete(uid); }
+    for (const uid of needed) {
+      if (authors.has(uid)) continue;
+      const entry = { info: undefined, off: () => {} };
+      authors.set(uid,entry);
+      entry.off = onValue(socialPath("identities/"+uid), s => { entry.info = s.val() || undefined; paint(); },
+        () => { entry.info = undefined; paint(); });
+    }
+    paint();
+  }, err => { live=false; clearAuthors(); fail(err); });
+  return () => { live=false; off(); clearAuthors(); };
 }
 
 async function censorMessage(message) {
@@ -3926,9 +4129,10 @@ const messageDate = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "s
 function communityMessage(m) {
   const date = new Date(m.createdAt);
   return el("article", { class: "orbit-message" },
-    avatarEl("", m.pseudo, 32),
+    avatarEl(m.identity?.avatar, handleName(m.pseudo,m.identity), 32),
     el("div", { class: "orbit-message-main" },
-      el("div", { class: "hrow" }, el("strong", { text: m.pseudo }),
+      el("div", { class: "hrow" }, identityLabel(m.pseudo,m.identity),
+        handleName(m.pseudo,m.identity) !== m.pseudo ? el("span",{class:"hint",text:"@"+m.pseudo}) : null,
         m.uid === social.adminUid ? el("span", { class: "tag", text: "Admin" }) : null,
         el("time", { class: "hint", datetime: date.toISOString(), text: messageDate.format(date) })),
       el("div", { class: m.censored ? "hint" : "pre", text: m.censored ? "Message masqué par la modération." : m.text })),
@@ -4168,8 +4372,8 @@ function pcard(uid, p) {
   const acc = HEX_RE.test(p.accent) ? p.accent : "#ff7a3d";
   return el("div", { class: "pcard", onclick: () => openProfile(uid) },
     el("div", { class: "pb", style: `background:linear-gradient(135deg,${acc},${acc}22)` }),
-    el("div", { class: "pi" }, avatarEl(p.avatar, p.pseudo, 60),
-      el("div", { class: "pname", style: "margin-top:8px", text: p.pseudo + (uid === S.uid ? " (toi)" : "") }),
+    el("div", { class: "pi" }, avatarEl(p.avatar, handleName(p.pseudo,p), 60),
+      el("div", { class: "pname", style: "margin-top:8px", }, identityLabel(p.pseudo,p), uid === S.uid ? " (toi)" : ""),
       p.bio ? el("div", { class: "pbio", text: String(p.bio).slice(0, MAX_BIO) }) : null,
       el("div", { class: "pstats" },
         el("span", {}, icon("gamepad", 14), `${toInt(p.games)} jeux`),
@@ -4187,7 +4391,7 @@ function peopleView() {
   const grid = el("div", { class: "plist" });
   const fill = () => {
     const q = normalize(S.cq.trim());
-    const list = Object.entries(pubIndex).filter(([, p]) => p && typeof p === "object" && typeof p.pseudo === "string" && (!q || normalize(p.pseudo).includes(q)))
+    const list = Object.entries(pubIndex).filter(([, p]) => p && typeof p === "object" && typeof p.pseudo === "string" && (!q || normalize(p.pseudo).includes(q) || normalize(handleName(p.pseudo,p)).includes(q)))
       .sort((a, b) => (b[1].updated || 0) - (a[1].updated || 0));
     if (!list.length) grid.replaceChildren(el("div", { class: "msgc", style: "grid-column:1/-1", text: q ? "Aucun profil trouvé." : "Aucun profil public pour l'instant." }));
     else grid.replaceChildren(...list.map(([u, p]) => pcard(u, p)));
@@ -4260,13 +4464,13 @@ function renderProfile(v) {
   const cv = S.cv, p = (pubIndex && pubIndex[cv.uid]) || {};
   const backBtn = el("button", { class: "iconbtn", type: "button", "aria-label": "Retour", onclick: () => { S.cv = { type: "list" }; renderCommunity(); window.scrollTo(0, 0); } }, icon("back", 20));
   const body = el("div", { class: "vbody" });
-  v.replaceChildren(el("header", { class: "vhead glass" }, el("div", { class: "hrow" }, backBtn, el("div", { class: "brand", text: p.pseudo || "Profil" }))), body);
+  v.replaceChildren(el("header", { class: "vhead glass" }, el("div", { class: "hrow" }, backBtn, el("div", { class: "brand", text: handleName(p.pseudo,p) || "Profil" }))), body);
   const acc = HEX_RE.test(p.accent) ? p.accent : "var(--accent)";
   const common = cv.data ? cv.data.filter((i) => findMine(i.kind, i.name)).length : 0;
   body.append(el("div", { class: "phero" },
     el("div", { class: "pb", style: `background:linear-gradient(135deg,${acc},transparent)` }),
-    el("div", { class: "pi" }, avatarEl(p.avatar, p.pseudo, 88),
-      el("div", { class: "pname", style: "font-size:1.4rem;margin-top:10px", text: (p.pseudo || "") + (cv.uid === S.uid ? " (toi)" : "") }),
+    el("div", { class: "pi" }, avatarEl(p.avatar, handleName(p.pseudo,p), 88),
+      el("div", { class: "pname", style: "font-size:1.4rem;margin-top:10px", }, identityLabel(p.pseudo,p), cv.uid === S.uid ? " (toi)" : ""), el("div",{class:"sd",text:"@" + (p.pseudo || "")}),
       p.bio ? el("div", { class: "pre sub", style: "margin-top:6px;color:var(--soft)", text: String(p.bio).slice(0, MAX_BIO) }) : null,
       el("div", { class: "pstats" },
         el("span", {}, icon("gamepad", 14), `${toInt(p.games)} jeux · ${toInt(p.gamesDone)} terminés`),
@@ -4348,7 +4552,7 @@ function renderSettings() {
     const f = avFile.files && avFile.files[0];
     avFile.value = "";
     if (!f) return;
-    try { saveProfile({ avatar: await blobToJpeg(f, AVATAR_SIDE, 0.85, true) }); renderSettings(); toast("Photo mise à jour"); }
+    try { await editPortrait(f); }
     catch (e) { toast("Image illisible."); }
   });
   const bio = el("textarea", { class: "field", maxlength: String(MAX_BIO), style: "min-height:80px", placeholder: "Quelques mots sur toi : tes jeux du moment, tes genres préférés…" });
@@ -4376,10 +4580,16 @@ function renderSettings() {
     right: el("div", { id: "orbit-admin-entry", hidden: !isModerator() }, socialBtn("Administration", openAdministration)) }),
     el("div", { class: "vbody" }, el("div", { class: "set-wrap" },
       group("Profil", "user",
-        el("div", { class: "srow" }, avatarEl(S.profile.avatar, S.pseudo, 64),
-          el("div", { class: "sl" }, el("div", { class: "stt", style: "font-size:1.1rem", text: S.pseudo }), el("div", { class: "sd", text: "Ton pseudo de connexion" })),
+        el("div", { class: "srow" }, avatarEl(S.profile.avatar, myName(), 64),
+          el("div", { class: "sl" }, el("div", { class: "stt", style: "font-size:1.1rem" }, identityLabel(S.pseudo,S.profile)), el("div", { class: "sd", text: "Identifiant de connexion · @" + S.pseudo })),
           el("div", { class: "hrow" }, el("button", { class: "btn small", type: "button", onclick: () => avFile.click() }, icon("image", 15), "Changer la photo"),
-            S.profile.avatar ? el("button", { class: "btn small", type: "button", onclick: () => { saveProfile({ avatar: "" }); renderSettings(); } }, "Retirer") : null, avFile)),
+            S.profile.avatar ? socialBtn("Recadrer", () => editPortrait(S.profile.avatarOriginal || S.profile.avatar).catch(() => toast("Image illisible."))) : null,
+            S.profile.avatar ? socialBtn("Retirer", async () => {
+              try { await saveIdentity({avatar:"",avatarOriginal:"",avatarCrop:null}); if(S.store) renderSettings(); }
+              catch(err) { toast(friendlyDb(err)); }
+            }) : null, avFile)),
+        row("Pseudo d’affichage", "Visible sur ton profil et dans le chat.", socialBtn("Modifier le pseudo",renameProfile)),
+        row("Mes titres", findTitle(S.profile.titleId)?.name || "Choisis la couleur et la police de ton pseudo en équipant un titre.", socialBtn("Choisir un titre",chooseTitle)),
         row("Bio", "Visible sur ton profil public (300 caractères max).", bio, true),
         row("Profil public", "Les autres joueurs peuvent voir ta collection dans l'onglet Communauté.", el("label", { class: "switch" }, pubSw, el("span")))),
       group("Thème", "palette",
