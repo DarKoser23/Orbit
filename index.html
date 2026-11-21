@@ -787,6 +787,19 @@ html.notitles .grid:not(.list) .cinfo{display:none}
 
 /* reglages */
 .set-wrap{max-width:780px;margin:0 auto}
+.orbit-log{max-height:52vh;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+.orbit-message{display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.orbit-message:last-child{border-bottom:0}
+.orbit-message .avatar{flex:none}
+.orbit-message-main{flex:1;min-width:0}
+.orbit-message .pre,.orbit-message-main>.hint{margin-top:4px}
+.orbit-compose{margin:0;max-width:none}
+.orbit-compose textarea{min-width:0}
+.orbit-admin-body{margin-top:14px}
+.orbit-admin-body .sl{min-width:0;overflow-wrap:anywhere}
+.orbit-admin-body details>form{margin-top:8px}
+@media(max-width:420px){#v-community .seg button,.orbit-admin-tabs button{padding-inline:9px}.orbit-message{gap:7px;padding-inline:9px}}
+
 .group{margin-bottom:26px}
 .gtitle{display:flex;align-items:center;gap:8px;font-size:.76rem;font-weight:800;text-transform:uppercase;letter-spacing:.07em;color:var(--dim);margin:0 6px 8px}
 .gcard{background:var(--field);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
@@ -951,7 +964,7 @@ setTimeout(function () {
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-app.js";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-auth.js";
-import { getDatabase, ref, onValue, runTransaction, set, get, update, remove } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-database.js";
+import { getDatabase, ref, onValue, runTransaction, set, get, update, remove, push as newDbChild, query, orderByChild, limitToLast, endBefore, serverTimestamp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-database.js";
 
 // =========================================================================
 //  A REMPLIR (voir le guide)
@@ -1014,6 +1027,7 @@ const PREF_CHOICES = {
 const STAR_D = "M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z";
 const STAR_SVG = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="${STAR_D}"/></svg>`;
 const ICONS = {
+  chat: '<path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H7l-4 2 1.3-5A8.5 8.5 0 1 1 21 11.5Z"/>',
   grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/>',
   list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
   chart: '<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
@@ -1798,6 +1812,7 @@ function startSession(user) {
   unsubs.push(onValue(ref(db, ".info/connected"), (snap) => {
     if (myGen !== gen) return;
     S.connected = snap.val() === true;
+    socialEvents.dispatchEvent(new Event("connection"));
     if (S.connected && S.store && (S.store.dirty || S.store.pendingCovers.size)) schedulePush(300);
     if (S.connected) schedulePublish(3000);
     updateSyncLabel();
@@ -1850,9 +1865,12 @@ function startSession(user) {
     S.ratingMeta = v && typeof v === "object" ? v : {};
     refreshVisible();
   }, () => {}));
+  startSocial(user, myGen);
 }
 function endSession() {
   gen++;
+  stopSocial();
+  S.ctab = "people";
   for (const u of unsubs) { try { u(); } catch (e) { /* deja arrete */ } }
   unsubs = [];
   clearTimeout(pushTimer);
@@ -2195,6 +2213,7 @@ function go(tab, fromBack = false) {
   if (!S.store) return;
   const prev = S.tab;
   S.tab = tab;
+  if (tab !== "community") stopRoom();
   for (const [t] of TABS) {
     $("v-" + t).hidden = t !== tab;
     SIDE[t].classList.toggle("on", t === tab);
@@ -2444,7 +2463,7 @@ function thumbImg(urls) {
   return img;
 }
 function sourceText(k) {
-  if (k === "anime") return "Recherche sur AniList.";
+  if (k === "anime") return "Recherche dans le catalogue Orbit et sur AniList.";
   const s = [];
   if (S.prefs.srcSteam && PROXY_URL.trim()) s.push("Steam");
   if (S.prefs.srcWiki) s.push("Wikipédia");
@@ -2454,6 +2473,7 @@ function sourceText(k) {
 function openSearch({ kind, mode = "add", query = "" }) {
   return new Promise((resolve) => {
     let k = kind, token = 0, last = null, timer = null, busy = false, picked = null, manual = null, names = new Set();
+    let online = [], waiting = false, onlineError = null;
     const input = el("input", { class: "field", type: "search", enterkeyhint: "search", autocomplete: "off", autocorrect: "off", autocapitalize: "off", spellcheck: "false" });
     const source = el("div", { class: "hint", style: "margin:8px 2px 14px" });
     const msg = el("div", { class: "msgc" });
@@ -2473,7 +2493,7 @@ function openSearch({ kind, mode = "add", query = "" }) {
     const m = openModal({
       title: mode === "add" ? "Ajouter à ma collection" : "Trouver une image en ligne", sheet: true,
       body: [kindSeg, el("div", { class: "searchbox" }, icon("search", 18), input), source, msg, list, fb], foot,
-      onClose: () => { token++; clearTimeout(timer); resolve(mode === "pick" ? picked : { manual, kind: k }); },
+      onClose: () => { token++; clearTimeout(timer); socialEvents.removeEventListener("catalog", catalogUpdate); resolve(mode === "pick" ? picked : { manual, kind: k }); },
     });
     const intro = () => `Tape le nom d'un ${KIND_WORDS[k][0]} pour lancer la recherche.`;
     const showMsg = (t) => { msg.textContent = t; msg.hidden = false; list.hidden = true; };
@@ -2494,6 +2514,24 @@ function openSearch({ kind, mode = "add", query = "" }) {
       setFb("");
       run(false);
     }
+    function showMatches(results, error) {
+      if (results.length) {
+        msg.hidden = true;
+        list.hidden = false;
+        list.replaceChildren(...results.map(makeRow));
+      } else if (error) {
+        showMsg(friendlyError(error) + "\n\nAppuie sur « Rechercher » au clavier pour réessayer.");
+      } else {
+        showMsg("Aucun résultat pour « " + spaces(input.value) + " »." + (mode === "add" ? "\nTu peux l'ajouter avec « À la main »." : ""));
+      }
+    }
+    function catalogUpdate() {
+      const term = spaces(input.value);
+      if (k !== "anime" || term.length < 2 || term !== last) return;
+      const results = mergeAnimeResults(orbitAnimeResults(term, mode === "pick"), online);
+      if (results.length || !waiting) showMatches(results, onlineError);
+    }
+    socialEvents.addEventListener("catalog", catalogUpdate);
     async function run(force) {
       clearTimeout(timer);
       const q = spaces(input.value);
@@ -2504,18 +2542,19 @@ function openSearch({ kind, mode = "add", query = "" }) {
       msg.hidden = true;
       list.hidden = false;
       list.replaceChildren(...[1, 2, 3, 4].map(() => el("div", { class: "skel" })));
+      online = []; onlineError = null; waiting = true;
+      catalogUpdate();
       try {
         const res = k === "game" ? await searchGames(q) : await searchAnilist(q);
         if (t !== token) return;
-        if (!res.length) {
-          showMsg(`Aucun résultat pour « ${q} ».` + (mode === "add" ? "\nTu peux l'ajouter avec « À la main »." : ""));
-          return;
-        }
-        list.replaceChildren(...res.map(makeRow));
+        waiting = false;
+        if (k === "anime") { online = res; catalogUpdate(); }
+        else showMatches(res);
       } catch (e) {
         if (t !== token) return;
-        last = null;
-        showMsg(friendlyError(e) + "\n\nAppuie sur « Rechercher » au clavier pour réessayer.");
+        waiting = false;
+        if (k === "anime") { onlineError = e; catalogUpdate(); }
+        else { last = null; showMatches([], e); }
       }
     }
     function makeRow(r) {
@@ -2523,7 +2562,7 @@ function openSearch({ kind, mode = "add", query = "" }) {
       const avg = communityAvg(k, r.name);
       const tag = el("div", { class: "tag", text: "✓ Dans ta collection", hidden: !known });
       const btn = el("button", { class: "btn primary small", type: "button", hidden: known }, mode === "add" ? icon("plus", 16) : null, mode === "add" ? "Ajouter" : "Choisir");
-      const row = el("div", { class: "row" }, thumbImg(r.thumbs),
+      const row = el("div", { class: "row" }, r.thumbs.length ? thumbImg(r.thumbs) : el("div", { class: "noimg" }),
         el("div", { class: "txt" }, el("div", { class: "rt", text: r.name }),
           r.alt ? el("div", { class: "rs", text: r.alt }) : null,
           el("div", { class: "rs" }, r.src ? el("span", { class: "src", text: r.src }) : null, r.info || ""),
@@ -2535,15 +2574,16 @@ function openSearch({ kind, mode = "add", query = "" }) {
     }
     async function choose(r, btn, tag) {
       if (busy || isKnown(r)) return;
+      const selectedKind = k;
       busy = true;
       const old = [...btn.childNodes];
       btn.disabled = true;
       btn.replaceChildren("Téléchargement…");
       setFb("");
       let data = null;
-      try { data = await fetchImage(r.covers); } catch (e) { data = null; }
+      try { if (r.covers.length) data = await fetchImage(r.covers); } catch (e) { data = null; }
       busy = false;
-      if (!m.isOpen()) return;
+      if (!m.isOpen() || k !== selectedKind) return;
       btn.disabled = false;
       btn.replaceChildren(...old);
       if (mode === "pick") {
@@ -2557,7 +2597,7 @@ function openSearch({ kind, mode = "add", query = "" }) {
       tag.hidden = false;
       btn.hidden = true;
       if (item && S.prefs.openAfterAdd) { m.close(); openDetail(item.id); return; }
-      setFb(`« ${r.name} » ajouté !` + (data ? "" : " (sans image : le téléchargement a échoué)"));
+      setFb(`« ${r.name} » ajouté !` + (data || !r.covers.length ? "" : " (sans image : le téléchargement a échoué)"));
     }
     input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => run(false), 500); });
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); run(true); input.blur(); } });
@@ -3775,6 +3815,319 @@ async function askAI(text) {
   if (first && conv.auto && !bot.error) genTitle(conv, text, bot.content);
 }
 
+// Communauté et modération
+const socialPath = (path) => ref(db, "orbitCommunity/" + path);
+const socialEvents = new EventTarget();
+const social = { adminUid: null, catalog: {}, catalogReady: false, catalogFailed: false, draft: "", sending: false };
+const isModerator = () => !!S.uid && social.adminUid === S.uid;
+const socialBtn = (label, click, cls = "") => el("button", { class: "btn small " + cls, type: "button", text: label, onclick: click });
+const socialStatus = (text) => el("div", { class: "msgc", role: "status", text });
+let leaveRoom = null, adminPanel = null;
+
+function startSocial(user, myGen) {
+  let registered = false;
+  const watch = (path, receive, fail) => unsubs.push(onValue(socialPath(path),
+    (snap) => { if (gen === myGen) receive(snap.val()); },
+    () => { if (gen === myGen && fail) fail(); }));
+  watch("bans/" + user.uid, (banned) => {
+    if (banned === true) {
+      endSession();
+      showLogin();
+      const notice = "Ce compte a été banni d’Orbit.";
+      $("lgError").textContent = notice;
+      $("lgError").hidden = false;
+      signOut(auth).then(() => {
+        if (!S.uid) { $("lgError").textContent = notice; $("lgError").hidden = false; }
+      }).catch(() => toast(notice));
+      return;
+    }
+    if (!registered) {
+      registered = true;
+      set(socialPath("members/" + user.uid), S.pseudo).catch(() => { registered = false; });
+    }
+  });
+  watch("adminUid", (value) => {
+    social.adminUid = typeof value === "string" ? value : null;
+    if (!isModerator() && adminPanel) adminPanel.close();
+    const entry = $("orbit-admin-entry");
+    if (entry) entry.hidden = !isModerator();
+    socialEvents.dispatchEvent(new Event("role"));
+  });
+  const catalogChanged = (data, failed) => {
+    social.catalog = data || {};
+    social.catalogReady = true;
+    social.catalogFailed = failed;
+    socialEvents.dispatchEvent(new Event("catalog"));
+  };
+  watch("animes", (value) => catalogChanged(value, false), () => catalogChanged(null, true));
+}
+
+function stopRoom() {
+  if (leaveRoom) leaveRoom();
+  leaveRoom = null;
+}
+
+function stopSocial() {
+  stopRoom();
+  social.adminUid = null;
+  social.catalog = {};
+  social.catalogReady = false;
+  social.catalogFailed = false;
+  social.draft = "";
+  social.sending = false;
+}
+
+function orbitAnimeResults(term, requireImage) {
+  const q = normalize(term);
+  return Object.values(social.catalog)
+    .filter((a) => a && typeof a.name === "string" && normalize(a.name).includes(q) && (!requireImage || a.cover))
+    .sort((a, b) => Number(normalize(b.name) === q) - Number(normalize(a.name) === q) || a.name.localeCompare(b.name, "fr"))
+    .slice(0, SEARCH_LIMIT)
+    .map((a) => ({
+      name: a.name, alt: "", src: "Orbit", total: a.total || 0, description: a.description || "",
+      info: a.total ? a.total + (a.total === 1 ? " épisode" : " épisodes") : "",
+      covers: uniq([a.cover]), thumbs: uniq([a.cover]),
+    }));
+}
+
+function mergeAnimeResults(local, online) {
+  const names = new Set(local.map((r) => normalize(r.name)));
+  return [...local, ...online.filter((r) => !names.has(normalize(r.name)) && !(r.alt && names.has(normalize(r.alt))))];
+}
+
+function watchMessages(cursor, receive, fail) {
+  const constraints = [orderByChild("createdAt")];
+  if (cursor) constraints.push(endBefore(cursor.time, cursor.key));
+  constraints.push(limitToLast(60));
+  return onValue(query(socialPath("messages"), ...constraints), (snap) => {
+    const list = [];
+    snap.forEach((child) => { list.push({ ...child.val(), key: child.key }); });
+    receive(list);
+  }, fail);
+}
+
+async function censorMessage(message) {
+  const session = gen;
+  if (!isModerator() || !await confirmBox("Masquer définitivement le message de " + message.pseudo + " pour tout le salon ?", "Masquer", { danger: true })) return;
+  if (gen !== session || !isModerator()) return;
+  try {
+    await update(socialPath("messages/" + message.key), { text: null, censored: true });
+    toast("Message masqué pour tous.");
+  } catch (err) { toast(friendlyDb(err)); }
+}
+
+const messageDate = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+function communityMessage(m) {
+  const date = new Date(m.createdAt);
+  return el("article", { class: "orbit-message" },
+    avatarEl("", m.pseudo, 32),
+    el("div", { class: "orbit-message-main" },
+      el("div", { class: "hrow" }, el("strong", { text: m.pseudo }),
+        m.uid === social.adminUid ? el("span", { class: "tag", text: "Admin" }) : null,
+        el("time", { class: "hint", datetime: date.toISOString(), text: messageDate.format(date) })),
+      el("div", { class: m.censored ? "hint" : "pre", text: m.censored ? "Message masqué par la modération." : m.text })),
+    isModerator() && !m.censored ? socialBtn("Masquer", () => censorMessage(m)) : null);
+}
+
+function renderRoom(body) {
+  stopRoom();
+  const session = gen;
+  const log = el("div", { class: "gcard orbit-log", role: "region", "aria-label": "Messages du salon", tabindex: "0" }, socialStatus("Chargement des messages…"));
+  const input = el("textarea", { class: "field", rows: "2", maxlength: "1000", placeholder: "Écris au salon…", "aria-label": "Ton message", value: social.draft });
+  const send = el("button", { class: "sendbtn", type: "submit", "aria-label": "Envoyer le message" }, icon("send", 18));
+  const status = el("div", { class: "hint", role: "status" });
+  let ready = false, active = true, list = [];
+  const controls = () => {
+    send.disabled = !ready || !S.connected || social.sending || !input.value.trim();
+    status.textContent = !S.connected ? "Hors connexion" : social.sending ? "Envoi en cours…" : "";
+  };
+  input.addEventListener("input", () => { social.draft = input.value; controls(); });
+  const form = el("form", { class: "cbox orbit-compose" }, input, send);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!send.disabled) form.requestSubmit(); }
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (send.disabled || session !== gen) return;
+    const draft = input.value;
+    social.sending = true;
+    controls();
+    try {
+      await set(newDbChild(socialPath("messages")), { uid: S.uid, pseudo: S.pseudo, createdAt: serverTimestamp(), text: draft.trim() });
+      if (session === gen && social.draft === draft) {
+        social.draft = "";
+        if (active) input.value = "";
+        else socialEvents.dispatchEvent(new Event("draft"));
+      }
+    } catch (err) { if (session === gen) toast(friendlyDb(err)); }
+    finally {
+      if (session === gen) {
+        social.sending = false;
+        socialEvents.dispatchEvent(new Event("connection"));
+      }
+    }
+  });
+  const paint = () => {
+    if (!ready || !active) return;
+    const atEnd = log.scrollHeight - log.clientHeight - log.scrollTop < 65;
+    log.replaceChildren(...(list.length ? list.map(communityMessage) : [socialStatus("Le salon est ouvert. Écris le premier message !")]));
+    if (atEnd) log.scrollTop = log.scrollHeight;
+  };
+  const syncDraft = () => { input.value = social.draft; controls(); };
+  body.append(el("div", { class: "set-wrap vstack" }, log, form, status));
+  controls();
+  const off = watchMessages(null, (messages) => { ready = true; list = messages; paint(); controls(); },
+    (err) => { ready = false; log.replaceChildren(socialStatus(friendlyDb(err))); controls(); });
+  socialEvents.addEventListener("role", paint);
+  socialEvents.addEventListener("connection", controls);
+  socialEvents.addEventListener("draft", syncDraft);
+  leaveRoom = () => {
+    active = false; off();
+    socialEvents.removeEventListener("role", paint);
+    socialEvents.removeEventListener("connection", controls);
+    socialEvents.removeEventListener("draft", syncDraft);
+  };
+}
+
+function adminMessages(host) {
+  const nav = el("div", { class: "hrow" }), list = el("div", { class: "gcard" });
+  host.append(nav, list);
+  const cursors = [null];
+  let off;
+  function loadPage() {
+    if (off) off();
+    nav.replaceChildren();
+    list.replaceChildren(socialStatus("Chargement des messages…"));
+    off = watchMessages(cursors[cursors.length - 1], (messages) => {
+      list.replaceChildren(...(messages.length ? messages.slice().reverse().map(communityMessage) : [socialStatus("Aucun message sur cette page.")]));
+      nav.replaceChildren();
+      if (cursors.length > 1) nav.append(socialBtn("Plus récents", () => { cursors.pop(); loadPage(); }));
+      if (messages.length === 60) nav.append(socialBtn("Plus anciens", () => {
+        cursors.push({ time: messages[0].createdAt, key: messages[0].key }); loadPage();
+      }));
+    }, (err) => list.replaceChildren(socialStatus(friendlyDb(err))));
+  }
+  loadPage();
+  return () => off();
+}
+
+function adminMembers(host) {
+  const filter = el("input", { class: "field", type: "search", placeholder: "Rechercher un pseudo ou un UID…", "aria-label": "Rechercher un compte" });
+  const list = el("div", { class: "gcard" }, socialStatus("Chargement des comptes…"));
+  host.append(filter, list);
+  let members = null, bans = null, failure = null;
+  const session = gen;
+  async function moderate(uid, banned) {
+    const label = members[uid] || uid;
+    const prompt = banned ? "Rendre à " + label + " l’accès à Orbit ?" : "Bannir " + label + " d’Orbit ? Ce compte sera déconnecté.";
+    if (!await confirmBox(prompt, banned ? "Débannir" : "Bannir", { danger: !banned }) || gen !== session || !isModerator()) return;
+    try {
+      await set(socialPath("bans/" + uid), banned ? null : true);
+      toast(banned ? "Compte débanni." : "Compte banni.");
+    } catch (err) { toast(friendlyDb(err)); }
+  }
+  function draw() {
+    if (failure) { list.replaceChildren(socialStatus(friendlyDb(failure))); return; }
+    if (!members || !bans) return;
+    const q = filter.value.trim(), term = normalize(q);
+    const ids = [...new Set([...Object.keys(members), ...Object.keys(bans)])].filter((uid) =>
+      normalize(members[uid] || "").includes(term) || uid.toLowerCase().includes(term));
+    ids.sort((a, b) => Number(!!bans[b]) - Number(!!bans[a]) || (members[a] || a).localeCompare(members[b] || b, "fr"));
+    const rows = ids.map((uid) => el("div", { class: "srow" },
+      el("div", { class: "sl" }, el("b", { text: members[uid] || uid }),
+        el("div", { class: "sd", text: uid === S.uid ? "Administrateur" : bans[uid] ? "Banni" : "Membre" })),
+      uid !== S.uid ? socialBtn(bans[uid] ? "Débannir" : "Bannir", () => moderate(uid, !!bans[uid]), bans[uid] ? "" : "danger") : null));
+    if (!rows.length) rows.push(socialStatus("Aucun compte trouvé."));
+    list.replaceChildren(...rows);
+  }
+  filter.addEventListener("input", draw);
+  const uidInput = el("input", { class: "field", placeholder: "UID Firebase du compte", "aria-label": "UID Firebase du compte", required: true, maxlength: "128", pattern: "[A-Za-z0-9_\\-]{1,128}" });
+  const byUid = el("form", { class: "vstack" }, el("div", { class: "hint", text: "Pour un ancien compte absent de la liste, copie son UID depuis Firebase Authentication." }),
+    uidInput, el("button", { class: "btn small", type: "submit", text: "Bannir par UID" }));
+  byUid.onsubmit = (e) => {
+    e.preventDefault();
+    const uid = uidInput.value.trim();
+    if (!members || !bans || !/^[A-Za-z0-9_-]{1,128}$/.test(uid)) return;
+    if (uid === S.uid || bans[uid]) return toast(uid === S.uid ? "C’est ton compte administrateur." : "Ce compte est déjà banni.");
+    moderate(uid, false);
+  };
+  host.append(el("details", {}, el("summary", { text: "Compte absent de la liste" }), byUid));
+  const fail = (err) => { failure = err; draw(); };
+  const offMembers = onValue(socialPath("members"), (s) => { members = s.val() || {}; draw(); }, fail);
+  const offBans = onValue(socialPath("bans"), (s) => { bans = s.val() || {}; draw(); }, fail);
+  return () => { offMembers(); offBans(); };
+}
+
+function editOrbitAnime(key) {
+  const old = social.catalog[key] || {};
+  const name = el("input", { class: "field", required: true, maxlength: MAX_NAME, value: old.name || "" });
+  const cover = el("input", { class: "field", type: "url", maxlength: "2048", placeholder: "https://…", value: old.cover || "" });
+  const total = el("input", { class: "field", type: "number", min: "1", max: "99999", step: "1", value: old.total || "" });
+  const desc = el("textarea", { class: "field", maxlength: MAX_DESC, rows: "4", value: old.description || "" });
+  const field = (label, input) => el("label", { class: "vstack" }, label, input);
+  const save = el("button", { class: "btn primary", type: "submit", text: "Enregistrer" });
+  const form = el("form", { class: "vstack" }, field("Titre", name), field("Nombre d’épisodes (facultatif)", total),
+    field("Lien HTTPS de la jaquette (facultatif)", cover), field("Description (facultative)", desc), save);
+  const m = openModal({ title: key ? "Modifier l’anime" : "Ajouter un anime", body: form, sheet: true, small: true });
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    if (!isModerator() || save.disabled) return;
+    const title = spaces(name.value), url = cover.value.trim();
+    if (!title) { name.focus(); return; }
+    if (url && !/^https:\/\//i.test(url)) return toast("La jaquette doit utiliser un lien HTTPS.");
+    if (Object.entries(social.catalog).some(([k, a]) => k !== key && normalize(a.name) === normalize(title))) return toast("Ce titre existe déjà dans le catalogue Orbit.");
+    save.disabled = true;
+    try {
+      const entry = { name: title };
+      if (url) entry.cover = new URL(url).href;
+      if (total.value) entry.total = Number(total.value);
+      if (desc.value.trim()) entry.description = desc.value.trim();
+      await set(key ? socialPath("animes/" + key) : newDbChild(socialPath("animes")), entry);
+      if (m.isOpen()) { m.close(); toast("Anime enregistré dans la recherche."); }
+    } catch (err) { if (m.isOpen()) toast(friendlyDb(err)); }
+    finally { save.disabled = false; }
+  };
+}
+
+function adminCatalog(host) {
+  const list = el("div", { class: "gcard" });
+  host.append(el("div", { class: "hrow" }, socialBtn("Ajouter un anime", () => editOrbitAnime(null), "primary")), list);
+  const draw = () => {
+    const entries = Object.entries(social.catalog).sort((a, b) => a[1].name.localeCompare(b[1].name, "fr"));
+    if (!entries.length) { list.replaceChildren(socialStatus(social.catalogFailed ? "Le catalogue est inaccessible." : social.catalogReady ? "Aucun anime ajouté au catalogue Orbit." : "Chargement du catalogue…")); return; }
+    list.replaceChildren(...entries.map(([key, a]) => el("div", { class: "srow" }, el("b", { class: "sl", text: a.name }),
+      socialBtn("Modifier", () => editOrbitAnime(key)), socialBtn("Retirer", async () => {
+        const session = gen;
+        if (!await confirmBox("Retirer « " + a.name + " » du catalogue Orbit ? Les collections personnelles sont conservées.", "Retirer", { danger: true }) || gen !== session || !isModerator()) return;
+        try { await remove(socialPath("animes/" + key)); toast("Anime retiré du catalogue."); }
+        catch (err) { toast(friendlyDb(err)); }
+      }, "danger"))));
+  };
+  socialEvents.addEventListener("catalog", draw);
+  draw();
+  return () => socialEvents.removeEventListener("catalog", draw);
+}
+
+function openAdministration() {
+  if (!isModerator() || adminPanel) return;
+  const tabs = el("div", { class: "seg orbit-admin-tabs" }), host = el("div", { class: "vstack orbit-admin-body" });
+  let cleanup = null;
+  adminPanel = openModal({ title: "Administration", sheet: true, body: [tabs, host], onClose: () => {
+    if (cleanup) cleanup();
+    adminPanel = null;
+  } });
+  for (const [name, renderTab] of [["Membres", adminMembers], ["Messages", adminMessages], ["Animes", adminCatalog]]) {
+    const button = el("button", { type: "button", text: name, onclick: () => {
+      if (cleanup) cleanup();
+      for (const tab of tabs.children) tab.classList.toggle("on", tab === button);
+      host.replaceChildren();
+      cleanup = renderTab(host);
+    } });
+    tabs.append(button);
+  }
+  tabs.firstElementChild.click();
+}
+
 // ================================================================ communaute
 async function loadIndex() {
   const myGen = gen;
@@ -3788,20 +4141,22 @@ async function loadIndex() {
     if (myGen !== gen) return;
     if (!pubIndex) pubErr = friendlyDb(e);
   }
-  if (S.tab !== "community") return;
+  if (S.tab !== "community" || S.ctab === "chat") return;
   const a = document.activeElement;
   if (a && a.tagName === "INPUT" && $("v-community").contains(a)) return;
   renderCommunity();
 }
 function renderCommunity() {
   const v = $("v-community");
+  stopRoom();
   if (!S.store) return;
   if (S.cv.type === "profile") { renderProfile(v); return; }
-  const seg = el("div", { class: "seg" }, [["people", "Profils", "users"], ["rank", "Classement", "trophy"]].map(([k, l, ic]) =>
+  const seg = el("div", { class: "seg" }, [["people", "Profils", "users"], ["rank", "Classement", "trophy"], ["chat", "Chat", "chat"]].map(([k, l, ic]) =>
     el("button", { type: "button", class: S.ctab === k ? "on" : "", onclick: () => { S.ctab = k; renderCommunity(); } }, icon(ic, 16), l)));
   const body = el("div", { class: "vbody" });
-  v.replaceChildren(viewHead({ title: "Communauté", sub: S.ctab === "rank" ? "Les notes de tous les joueurs Orbit" : "Découvre les collections des autres", below: seg }), body);
-  body.append(...(S.ctab === "rank" ? rankView() : peopleView()));
+  v.replaceChildren(viewHead({ title: "Communauté", sub: S.ctab === "chat" ? "Le salon de discussion de tous les membres" : S.ctab === "rank" ? "Les notes de tous les joueurs Orbit" : "Découvre les collections des autres", below: seg }), body);
+  if (S.ctab === "chat") renderRoom(body);
+  else body.append(...(S.ctab === "rank" ? rankView() : peopleView()));
 }
 function pcard(uid, p) {
   const acc = HEX_RE.test(p.accent) ? p.accent : "#ff7a3d";
@@ -4011,7 +4366,8 @@ function renderSettings() {
   const syncRow = el("div", { class: "sd", id: "syncRow" });
   const st = S.store;
 
-  v.replaceChildren(viewHead({ title: "Réglages", sub: "Personnalise Orbit à ton image", me: false }),
+  v.replaceChildren(viewHead({ title: "Réglages", sub: "Personnalise Orbit à ton image", me: false,
+    right: el("div", { id: "orbit-admin-entry", hidden: !isModerator() }, socialBtn("Administration", openAdministration)) }),
     el("div", { class: "vbody" }, el("div", { class: "set-wrap" },
       group("Profil", "user",
         el("div", { class: "srow" }, avatarEl(S.profile.avatar, S.pseudo, 64),
