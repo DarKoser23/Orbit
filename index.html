@@ -401,9 +401,15 @@ em.own { cursor: pointer; text-decoration: underline dotted; text-underline-offs
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Orbit">
 <meta name="theme-color" content="#0e0e10">
-<link rel="icon" type="image/png" href="icons/favicon.png">
-<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="./favicon.png">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
 <link rel="manifest" href="manifest.json">
+<script>
+if ("serviceWorker" in navigator && window.isSecureContext &&
+    /^https?:$/.test(location.protocol) && !window.__TAURI__) {
+  navigator.serviceWorker.register("./sw.js").catch((err) => console.warn("Installation Orbit", err));
+}
+</script>
 <meta name="theme-color" content="#04272A">
 <meta name="apple-mobile-web-app-title" content="Orbit">
 <title>Orbit</title>

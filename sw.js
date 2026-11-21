@@ -1,55 +1,54 @@
-const CACHE = "gamevault-v1";
-const CORE = ["./", "./index.html", "./manifest.webmanifest", "./apple-touch-icon.png", "./icon-512.png"];
+const scope = self.registration.scope;
+const prefix = "orbit-shell:" + scope + ":";
+const cacheName = prefix + "v2";
+const files = ["./", "./index.html", "./desktop.js", "./manifest.json", "./favicon.png",
+  "./apple-touch-icon.png", "./icon-192.png", "./icon-512.png"];
+const shell = new Set(files.map((file) => new URL(file, scope).href));
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE)
-      .then((cache) => Promise.all(CORE.map((u) => cache.add(u).catch(() => null))))
-      .then(() => self.skipWaiting())
-  );
+  event.waitUntil((async () => {
+    const cache = await caches.open(cacheName);
+    await cache.addAll([...shell].map((url) => new Request(url, { cache: "reload" })));
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim())
-  );
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter((key) => key.startsWith(prefix) && key !== cacheName)
+      .map((key) => caches.delete(key)));
+    await self.clients.claim();
+  })());
 });
-
-function remember(req, res) {
-  if (res && (res.ok || res.type === "opaque")) {
-    const copy = res.clone();
-    caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
-  }
-  return res;
-}
 
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
   const url = new URL(req.url);
-  const sameOrigin = url.origin === self.location.origin;
-  const library = (url.hostname === "www.gstatic.com" && url.pathname.startsWith("/firebasejs/"))
-    || url.hostname === "cdn.jsdelivr.net";
-
-  if (sameOrigin) {
-    // reseau d'abord (pour recevoir les mises a jour), sinon la copie gardee
-    event.respondWith((async () => {
-      const cached = () => caches.match(req, { ignoreSearch: true })
-        .then((r) => r || caches.match("./index.html"));
-      try {
-        const res = await Promise.race([
-          fetch(req),
-          new Promise((_, rej) => setTimeout(() => rej(new Error("lent")), 5000)),
-        ]);
-        return remember(req, res);
-      } catch (e) {
-        const hit = await cached();
-        return hit || fetch(req);
-      }
-    })());
-  } else if (library) {
-    event.respondWith(caches.match(req).then((hit) => hit || fetch(req).then((res) => remember(req, res))));
-  }
+  const asset = url.origin + url.pathname;
+  const isShell = shell.has(asset);
+  const library = (url.origin === "https://www.gstatic.com" && url.pathname.startsWith("/firebasejs/"))
+    || (url.origin === "https://cdn.jsdelivr.net" && url.pathname.startsWith("/npm/sortablejs@"));
+  if (!isShell && !library) return;
+  event.respondWith((async () => {
+    const cache = await caches.open(cacheName);
+    const key = isShell ? asset : req;
+    if (library) {
+      const hit = await cache.match(key);
+      if (hit) return hit;
+    }
+    let res;
+    try {
+      res = await fetch(req);
+    } catch (err) {
+      const hit = await cache.match(key);
+      if (hit) return hit;
+      throw err;
+    }
+    if (res.ok || (library && res.type === "opaque")) {
+      try { await cache.put(key, res.clone()); } catch { /* Cache indisponible ou plein. */ }
+    }
+    return res;
+  })());
 });
