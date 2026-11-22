@@ -2042,6 +2042,7 @@ function startSession(user) {
   retryRank();
   unsubs.push(() => { stopRatings(); retryRank = null; });
   startSocial(user, myGen);
+  startNetwork(user.uid, myGen);
 }
 function endSession() {
   gen++;
@@ -2395,7 +2396,7 @@ async function saveIdentity(fields) {
 function renameProfile() {
   const input = el("input",{class:"field",maxlength:32,value:myName(),"aria-label":"Pseudo d’affichage",autocomplete:"off"});
   const submit = el("button",{type:"submit",class:"btn primary",text:"Enregistrer"});
-  const form = el("form",{class:"vstack"},input,el("div",{class:"hint",text:"Visible sur ton profil et dans le chat. Ton identifiant de connexion reste @" + S.pseudo + "."}),submit);
+  const form = el("form",{class:"vstack"},input,el("div",{class:"hint",text:"Visible sur ton profil et dans la communauté. Ton identifiant de connexion reste @" + S.pseudo + "."}),submit);
   const m = openModal({title:"Pseudo d’affichage",small:true,body:form});
   form.onsubmit = async e => {
     e.preventDefault();
@@ -2417,7 +2418,7 @@ function chooseTitle() {
       try { await saveIdentity({titleId:id}); if(m.isOpen()) { m.close(); renderSettings(); } }
       catch(err) { toast(friendlyDb(err)); }
     };
-    box.replaceChildren(el("div",{class:"hint",text:"Chaque aperçu montre ton pseudo tel qu’il apparaîtra sur ton profil et dans le chat."}),
+    box.replaceChildren(el("div",{class:"hint",text:"Chaque aperçu montre ton pseudo tel qu’il apparaîtra sur ton profil et dans la communauté."}),
       socialBtn("Sans titre",choose("")), ...orbitTitles.map(t => el("div",{class:"srow"},
         el("div",{class:"sl"},identityLabel(S.pseudo,{displayName:myName(),titleId:t.id}),
           el("div",{class:"sd",text:unlocked[t.id] ? "Débloqué" : t.anime ? "Termine " + t.anime : t.count ? "Termine " + t.count + (t.count===1?" anime":" animes") : "Commande dans la recherche Animes · " + t.hint})),
@@ -2476,7 +2477,7 @@ async function editPortrait(source) {
     } catch(err){toast(friendlyDb(err));} finally{save.disabled=false;}
   },"primary");
   const m=openModal({title:"Recadrer la photo",small:true,body:el("div",{class:"vstack"},canvas,
-    el("div",{class:"hint",text:"Fais glisser la photo pour la centrer. Cet aperçu est visible dans le chat."}),
+    el("div",{class:"hint",text:"Fais glisser la photo pour la centrer. Cet aperçu est visible dans la communauté."}),
     el("label",{class:"vstack"},"Zoom",zoom)),foot:[socialBtn("Recentrer",()=>{x=y=.5;zoom.value=1;draw();}),el("div",{class:"grow"}),save]});
 }
 
@@ -2731,7 +2732,7 @@ function go(tab, fromBack = false) {
   if (!S.store) return;
   const prev = S.tab;
   S.tab = tab;
-  if (tab !== "community") stopRoom();
+  if (tab !== "community") stopNetworkView();
   for (const [t] of TABS) {
     $("v-" + t).hidden = t !== tab;
     SIDE[t].classList.toggle("on", t === tab);
@@ -4345,11 +4346,11 @@ async function askAI(text) {
 // Communauté et modération
 const socialPath = (path) => ref(db, "orbitCommunity/" + path);
 const socialEvents = new EventTarget();
-const social = { adminUid: null, catalog: {}, catalogReady: false, catalogFailed: false, draft: "", sending: false };
+const social = { adminUid: null, catalog: {}, catalogReady: false, catalogFailed: false };
 const isModerator = () => !!S.uid && social.adminUid === S.uid;
 const socialBtn = (label, click, cls = "") => el("button", { class: "btn small " + cls, type: "button", text: label, onclick: click });
 const socialStatus = (text) => el("div", { class: "msgc", role: "status", text });
-let leaveRoom = null, adminPanel = null;
+let leaveNetworkView = null, adminPanel = null;
 
 function startSocial(user, myGen) {
   let registered = false;
@@ -4389,19 +4390,18 @@ function startSocial(user, myGen) {
   watch("animes", (value) => catalogChanged(value, false), () => catalogChanged(null, true));
 }
 
-function stopRoom() {
-  if (leaveRoom) leaveRoom();
-  leaveRoom = null;
+function stopNetworkView() {
+  if (leaveNetworkView) leaveNetworkView();
+  leaveNetworkView = null;
 }
 
 function stopSocial() {
-  stopRoom();
+  stopNetworkView();
   social.adminUid = null;
   social.catalog = {};
   social.catalogReady = false;
   social.catalogFailed = false;
-  social.draft = "";
-  social.sending = false;
+  network = newNetwork();
 }
 
 function orbitAnimeResults(term, requireImage) {
@@ -4487,64 +4487,223 @@ function communityMessage(m) {
     isModerator() && !m.censored ? socialBtn("Masquer", () => censorMessage(m)) : null);
 }
 
-function renderRoom(body) {
-  stopRoom();
+const networkPath = path => ref(db, "orbitNetwork/" + path);
+function newNetwork() {
+  return { following: null, links: null, names: new Map(), errors: new Map(), pending: new Set(),
+    drafts: new Map(), sending: new Set(), search: "" };
+}
+let network = newNetwork();
+const networkChanged = () => socialEvents.dispatchEvent(new Event("network"));
+
+function startNetwork(uid, session) {
+  for (const key of ["following", "links"]) {
+    unsubs.push(onValue(networkPath(key + "/" + uid), snap => {
+      if (session !== gen) return;
+      network.errors.delete(key);
+      network[key] = snap.val() || {};
+      if (key === "links") {
+        for (const peer of network.drafts.keys()) {
+          if (network.links[peer] !== "friends") network.drafts.delete(peer);
+        }
+        for (const peer of Object.keys(network.links)) {
+          if (network.names.has(peer)) continue;
+          network.names.set(peer, "");
+          get(socialPath("members/" + peer)).then(s => {
+            if (session !== gen) return;
+            network.names.set(peer, s.val() || "");
+            networkChanged();
+          }).catch(() => { if (session === gen) network.names.delete(peer); });
+        }
+      }
+      networkChanged();
+    }, err => {
+      if (session !== gen) return;
+      network[key] = null;
+      network.errors.set(key, /permission[_ ]denied/i.test(err.code || err.message)
+        ? "Mon réseau est indisponible pour le moment. Les règles d’accès Firebase doivent être activées."
+        : friendlyDb(err));
+      networkChanged();
+    }));
+  }
+}
+
+function peerName(uid) {
+  const p = pubIndex?.[uid];
+  return p ? handleName(p.pseudo, p) : network.names.get(uid) || "Membre · " + uid.slice(0, 8);
+}
+
+function networkButton(label, key, action, cls = "") {
   const session = gen;
-  const log = el("div", { class: "gcard orbit-log", role: "region", "aria-label": "Messages du salon", tabindex: "0" }, socialStatus("Chargement des messages…"));
-  const input = el("textarea", { class: "field", rows: "2", maxlength: "1000", placeholder: "Écris au salon…", "aria-label": "Ton message", value: social.draft });
-  const send = el("button", { class: "sendbtn", type: "submit", "aria-label": "Envoyer le message" }, icon("send", 18));
-  const status = el("div", { class: "hint", role: "status" });
-  let ready = false, active = true, list = [];
-  const controls = () => {
-    send.disabled = !ready || !S.connected || social.sending || !input.value.trim();
-    status.textContent = !S.connected ? "Hors connexion" : social.sending ? "Envoi en cours…" : "";
+  const button = socialBtn(label, async () => {
+    if (session !== gen || network.pending.has(key) || !S.connected) return;
+    network.pending.add(key);
+    networkChanged();
+    try { await action(); }
+    catch (err) { if (session === gen) toast(friendlyDb(err)); }
+    finally { if (session === gen) { network.pending.delete(key); networkChanged(); } }
+  }, cls);
+  button.disabled = !S.connected || network.pending.has(key);
+  return button;
+}
+
+function followButton(uid) {
+  const active = !!network.following?.[uid];
+  const button = networkButton(active ? "Abonné" : "S’abonner", "follow/" + uid,
+    () => set(networkPath("following/" + S.uid + "/" + uid), active ? null : true), active ? "primary" : "");
+  button.prepend(icon("heart", 16));
+  button.setAttribute("aria-pressed", String(active));
+  button.title = active ? "Se désabonner" : "S’abonner au profil";
+  return button;
+}
+
+function friendActions(uid) {
+  const state = network.links?.[uid];
+  function change(label, mine, theirs, confirm = false) {
+    return networkButton(label, "link/" + uid, async () => {
+      const session = gen;
+      if (confirm && !await confirmBox("Retirer " + peerName(uid) + " de tes amis ? Votre conversation sera fermée.", "Retirer", { danger: true })) return;
+      if (session !== gen || network.links?.[uid] !== state) return;
+      await update(networkPath("links"), { [S.uid + "/" + uid]: mine, [uid + "/" + S.uid]: theirs });
+    });
+  }
+  if (state === "friends") return [socialBtn("Message privé", () => openDirect(uid), "primary"), change("Retirer des amis", null, null, true)];
+  if (state === "received") return [change("Accepter", "friends", "friends"), change("Refuser", null, null)];
+  if (state === "sent") return [change("Annuler la demande", null, null)];
+  return [change("Ajouter en ami", "sent", "received")];
+}
+
+function watchNetworkView(draw) {
+  socialEvents.addEventListener("network", draw);
+  socialEvents.addEventListener("connection", draw);
+  leaveNetworkView = () => {
+    socialEvents.removeEventListener("network", draw);
+    socialEvents.removeEventListener("connection", draw);
   };
-  input.addEventListener("input", () => { social.draft = input.value; controls(); });
-  const form = el("form", { class: "cbox orbit-compose" }, input, send);
-  input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!send.disabled) form.requestSubmit(); }
+  draw();
+}
+
+function networkNotice() {
+  if (network.errors.size) return socialStatus([...network.errors.values()][0]);
+  if (!network.links || !network.following) return socialStatus("Chargement de ton réseau…");
+  return S.connected ? null : socialStatus("Hors connexion");
+}
+
+function renderNetwork(body) {
+  const host = el("div", { class: "set-wrap vstack" });
+  const search = el("input", { class: "field", type: "search", placeholder: "Rechercher un ami…", "aria-label": "Rechercher un ami", value: network.search });
+  const friends = el("div", { class: "gcard" });
+  body.append(host);
+  const row = (uid, actions) => {
+    const p = pubIndex?.[uid], name = peerName(uid);
+    return el("div", { class: "srow" }, avatarEl(p?.avatar, name, 32),
+      el("div", { class: "sl" }, p ? socialBtn(name, () => openProfile(uid), "ghost") : el("b", { text: name })),
+      el("div", { class: "hrow" }, actions));
+  };
+  function friendRows() {
+    const term = normalize(network.search.trim());
+    const ids = Object.keys(network.links || {}).filter(uid => network.links[uid] === "friends"
+      && normalize(peerName(uid) + " " + (pubIndex?.[uid]?.pseudo || network.names.get(uid) || "")).includes(term));
+    ids.sort((a,b) => peerName(a).localeCompare(peerName(b), "fr"));
+    friends.replaceChildren(...(ids.length ? ids.map(uid => row(uid, friendActions(uid))) :
+      [socialStatus(term ? "Aucun ami trouvé." : "Ajoute un ami depuis son profil pour discuter en privé.")]));
+  }
+  search.oninput = () => { network.search = search.value; friendRows(); };
+  const section = (title, content) => el("section", { class: "vstack" }, el("h3", { text: title }), content);
+  watchNetworkView(() => {
+    const notice = networkNotice();
+    if (!network.links || !network.following) { host.replaceChildren(notice); return; }
+    const focused = search === document.activeElement;
+    host.replaceChildren();
+    if (notice) host.append(notice);
+    for (const [state,label] of [["received","Demandes reçues"],["sent","Demandes envoyées"]]) {
+      const ids = Object.keys(network.links).filter(uid => network.links[uid] === state);
+      if (ids.length) host.append(section(label, el("div", { class: "gcard" }, ids.map(uid => row(uid, friendActions(uid))))));
+    }
+    friendRows();
+    host.append(section("Mes amis", el("div", { class: "vstack" }, search, friends)));
+    const following = Object.keys(network.following);
+    host.append(section("Mes abonnements", el("div", { class: "gcard" }, following.length ?
+      following.map(uid => row(uid, followButton(uid))) : socialStatus("Touche le cœur d’un profil pour le retrouver ici."))));
+    if (focused) search.focus({ preventScroll: true });
   });
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (send.disabled || session !== gen) return;
+}
+
+function openDirect(uid) {
+  if (network.links?.[uid] !== "friends") return;
+  const session = gen, me = S.uid;
+  const thread = networkPath("threads/" + [me, uid].sort().join("/"));
+  const log = el("div", { class: "gcard orbit-log", role: "log", "aria-label": "Messages privés", tabindex: "0" }, socialStatus("Chargement…"));
+  const input = el("textarea", { class: "field", rows: 2, maxlength: 1000, placeholder: "Écris un message privé…", "aria-label": "Message privé", value: network.drafts.get(uid) || "" });
+  const send = el("button", { class: "sendbtn", type: "submit", "aria-label": "Envoyer" }, icon("send", 18));
+  const form = el("form", { class: "cbox orbit-compose" }, input, send);
+  const status = el("div", { class: "hint", role: "status" });
+  let ready = false, off = () => {}, limit = 60, first = true;
+  const older = socialBtn("Afficher les messages précédents", () => { limit += 60; listen(); });
+  older.hidden = true;
+  const modal = openModal({ title: "Discussion avec " + peerName(uid), sheet: true,
+    body: el("div", { class: "vstack" }, older, log, form, status),
+    onClose: () => {
+      off();
+      socialEvents.removeEventListener("network", controls);
+      socialEvents.removeEventListener("connection", controls);
+    } });
+  function controls() {
+    if (network.links?.[uid] !== "friends") { log.replaceChildren(); modal.close(); return; }
+    input.value = network.drafts.get(uid) || "";
+    send.disabled = !ready || !S.connected || network.sending.has(uid) || !input.value.trim();
+    status.textContent = !S.connected ? "Hors connexion" : network.sending.has(uid) ? "Envoi en cours…" : "";
+  }
+  function listen() {
+    off();
+    off = onValue(query(thread, orderByChild("createdAt"), limitToLast(limit)), snap => {
+      if (!modal.isOpen() || session !== gen) return;
+      const atEnd = first || log.scrollHeight - log.clientHeight - log.scrollTop < 65;
+      const previousHeight = log.scrollHeight;
+      const loadingOlder = !first && older.disabled;
+      first = false;
+      const rows = [];
+      snap.forEach(child => {
+        const m = child.val(), date = new Date(m.createdAt);
+        rows.push(el("article", { class: "orbit-message" }, el("div", { class: "orbit-message-main" },
+          el("div", { class: "hrow" }, el("b", { text: m.uid === me ? "Moi" : peerName(uid) }),
+            el("time", { class: "hint", datetime: date.toISOString(), text: messageDate.format(date) })),
+          el("div", { class: "pre", text: m.text }))));
+      });
+      older.hidden = rows.length < limit;
+      older.disabled = false;
+      log.replaceChildren(...(rows.length ? rows : [socialStatus("Envoie le premier message.")]));
+      if (loadingOlder) log.scrollTop += log.scrollHeight - previousHeight;
+      else if (atEnd) log.scrollTop = log.scrollHeight;
+      ready = true;
+      controls();
+    }, err => {
+      ready = false;
+      older.hidden = true;
+      log.replaceChildren(socialStatus(friendlyDb(err)));
+      controls();
+    });
+    older.disabled = true;
+  }
+  input.oninput = () => { network.drafts.set(uid, input.value); controls(); };
+  input.onkeydown = e => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!send.disabled) form.requestSubmit(); }
+  };
+  form.onsubmit = async e => {
+    e.preventDefault();
+    if (send.disabled || session !== gen || network.links?.[uid] !== "friends") return;
     const draft = input.value;
-    social.sending = true;
+    network.sending.add(uid);
     controls();
     try {
-      await set(newDbChild(socialPath("messages")), { uid: S.uid, pseudo: S.pseudo, createdAt: serverTimestamp(), text: draft.trim() });
-      if (session === gen && social.draft === draft) {
-        social.draft = "";
-        if (active) input.value = "";
-        else socialEvents.dispatchEvent(new Event("draft"));
-      }
+      await set(newDbChild(thread), { uid: me, createdAt: serverTimestamp(), text: draft.trim() });
+      if (session === gen && network.drafts.get(uid) === draft) network.drafts.delete(uid);
     } catch (err) { if (session === gen) toast(friendlyDb(err)); }
-    finally {
-      if (session === gen) {
-        social.sending = false;
-        socialEvents.dispatchEvent(new Event("connection"));
-      }
-    }
-  });
-  const paint = () => {
-    if (!ready || !active) return;
-    const atEnd = log.scrollHeight - log.clientHeight - log.scrollTop < 65;
-    log.replaceChildren(...(list.length ? list.map(communityMessage) : [socialStatus("Le salon est ouvert. Écris le premier message !")]));
-    if (atEnd) log.scrollTop = log.scrollHeight;
+    finally { if (session === gen) { network.sending.delete(uid); networkChanged(); } }
   };
-  const syncDraft = () => { input.value = social.draft; controls(); };
-  body.append(el("div", { class: "set-wrap vstack" }, log, form, status));
-  controls();
-  const off = watchMessages(null, (messages) => { ready = true; list = messages; paint(); controls(); },
-    (err) => { ready = false; log.replaceChildren(socialStatus(friendlyDb(err))); controls(); });
-  socialEvents.addEventListener("role", paint);
   socialEvents.addEventListener("connection", controls);
-  socialEvents.addEventListener("draft", syncDraft);
-  leaveRoom = () => {
-    active = false; off();
-    socialEvents.removeEventListener("role", paint);
-    socialEvents.removeEventListener("connection", controls);
-    socialEvents.removeEventListener("draft", syncDraft);
-  };
+  socialEvents.addEventListener("network", controls);
+  controls();
+  listen();
 }
 
 function adminMessages(host) {
@@ -4700,7 +4859,7 @@ function openAdministration() {
     if (cleanup) cleanup();
     adminPanel = null;
   } });
-  for (const [name, renderTab] of [["Membres", adminMembers], ["Messages", adminMessages], ["Animes", adminCatalog], ["Maintenance", adminMaintenance]]) {
+  for (const [name, renderTab] of [["Membres", adminMembers], ["Ancien salon", adminMessages], ["Animes", adminCatalog], ["Maintenance", adminMaintenance]]) {
     const button = el("button", { type: "button", text: name, onclick: () => {
       if (cleanup) cleanup();
       for (const tab of tabs.children) tab.classList.toggle("on", tab === button);
@@ -4725,21 +4884,22 @@ async function loadIndex() {
     if (myGen !== gen) return;
     if (!pubIndex) pubErr = friendlyDb(e);
   }
-  if (S.tab !== "community" || S.ctab === "chat") return;
+  if (S.tab !== "community") return;
+  if (S.ctab === "network" && S.cv.type === "list") { networkChanged(); return; }
   const a = document.activeElement;
   if (a && a.tagName === "INPUT" && $("v-community").contains(a)) return;
   renderCommunity();
 }
 function renderCommunity() {
   const v = $("v-community");
-  stopRoom();
+  stopNetworkView();
   if (!S.store) return;
   if (S.cv.type === "profile") { renderProfile(v); return; }
-  const seg = el("div", { class: "seg" }, [["people", "Profils", "users"], ["rank", "Classement", "trophy"], ["chat", "Chat", "chat"]].map(([k, l, ic]) =>
+  const seg = el("div", { class: "seg" }, [["people", "Profils", "users"], ["rank", "Classement", "trophy"], ["network", "Mon réseau", "heart"]].map(([k, l, ic]) =>
     el("button", { type: "button", class: S.ctab === k ? "on" : "", onclick: () => { S.ctab = k; renderCommunity(); } }, icon(ic, 16), l)));
   const body = el("div", { class: "vbody" });
-  v.replaceChildren(viewHead({ title: "Communauté", sub: S.ctab === "chat" ? "Le salon de discussion de tous les membres" : S.ctab === "rank" ? "Les notes de tous les joueurs Orbit" : "Découvre les collections des autres", below: seg }), body);
-  if (S.ctab === "chat") renderRoom(body);
+  v.replaceChildren(viewHead({ title: "Communauté", sub: S.ctab === "network" ? "Tes abonnements, tes amis et tes discussions privées" : S.ctab === "rank" ? "Les notes de tous les joueurs Orbit" : "Découvre les collections des autres", below: seg }), body);
+  if (S.ctab === "network") renderNetwork(body);
   else body.append(...(S.ctab === "rank" ? rankView() : peopleView()));
 }
 function pcard(uid, p) {
@@ -4855,6 +5015,15 @@ function renderProfile(v) {
         el("span", {}, icon("tv", 14), `${toInt(p.animes)} animes · ${toInt(p.animesDone)} terminés`),
         Number(p.avg) > 0 ? el("span", { class: "score", text: "moyenne " + scoreLabel(Number(p.avg)) }) : null,
         cv.data && cv.uid !== S.uid ? el("span", {}, icon("check", 14), `${common} titre${common > 1 ? "s" : ""} en commun`) : null))));
+  if (cv.uid !== S.uid && p.pseudo) {
+    const actions = el("div", { class: "hrow", style: "margin:0 0 18px" });
+    body.append(actions);
+    watchNetworkView(() => {
+      const notice = networkNotice();
+      actions.replaceChildren(...[notice, network.following && followButton(cv.uid),
+        ...(network.links ? friendActions(cv.uid) : [])].filter(Boolean));
+    });
+  }
   if (cv.err) { body.append(el("div", { class: "msgc", text: cv.err })); return; }
   if (!cv.data) { body.append(el("div", { class: "center" }, el("div", { class: "loader" }))); return; }
   body.append(el("div", { class: "seg", style: "margin-bottom:18px" }, KINDS.map((k) => el("button", { type: "button", class: cv.kind === k ? "on" : "", onclick: () => { cv.kind = k; renderCommunity(); } },
@@ -4966,7 +5135,7 @@ function renderSettings() {
               try { await saveIdentity({avatar:"",avatarOriginal:"",avatarCrop:null}); if(S.store) renderSettings(); }
               catch(err) { toast(friendlyDb(err)); }
             }) : null, avFile)),
-        row("Pseudo d’affichage", "Visible sur ton profil et dans le chat.", socialBtn("Modifier le pseudo",renameProfile)),
+        row("Pseudo d’affichage", "Visible sur ton profil et dans la communauté.", socialBtn("Modifier le pseudo",renameProfile)),
         row("Mes titres", findTitle(S.profile.titleId)?.name || "Prévisualise les effets sur ton pseudo et équipe ton titre préféré.", socialBtn("Choisir un titre",chooseTitle)),
         row("Bio", "Visible sur ton profil public (300 caractères max).", bio, true),
         row("Profil public", "Les autres joueurs peuvent voir ta collection dans l'onglet Communauté.", el("label", { class: "switch" }, pubSw, el("span")))),

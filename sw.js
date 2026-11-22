@@ -1,6 +1,6 @@
 const scope = self.registration.scope;
 const prefix = "orbit-shell:" + scope + ":";
-const cacheName = prefix + "v2";
+const cacheName = prefix + "v3";
 const files = ["./", "./index.html", "./desktop.js", "./manifest.json", "./favicon.png",
   "./apple-touch-icon.png", "./icon-192.png", "./icon-512.png"];
 const shell = new Set(files.map((file) => new URL(file, scope).href));
