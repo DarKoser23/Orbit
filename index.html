@@ -1030,6 +1030,7 @@ body:has(.ad-break[open]){overflow:hidden}
 .ad-stage{background:var(--paper);flex:1;display:grid;align-items:center;min-height:min-content}
 .ad-poster{box-sizing:border-box;width:100%;max-width:1560px;margin:auto;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:clamp(24px,4vw,76px);align-items:center;padding:clamp(20px,4vw,72px)}
 .ad-art{width:100%;max-width:min(75dvh,740px);justify-self:center;aspect-ratio:1;background-size:300% 200%;background-repeat:no-repeat;border-radius:8px;box-shadow:6px 6px 0 #211e1d;outline:2px solid #211e1d}
+.ad-emblem{display:grid;place-items:center;background:radial-gradient(circle,#fff9e8 35%,transparent 36%),repeating-linear-gradient(-35deg,#ffffff40 0 15px,transparent 15px 30px);font-size:clamp(5rem,16vmin,12rem)}
 .ad-content{display:grid;gap:clamp(8px,1.8vw,25px);justify-items:start}
 .ad-brand{font:800 clamp(.7rem,1.3vw,1.1rem)/1.25 system-ui,sans-serif;letter-spacing:.085em;text-transform:uppercase;border-bottom:2px solid currentColor;padding-bottom:6px;margin:0}
 .ad-content h3{font:bold clamp(2.3rem,6.2vw,6.5rem)/.96 Georgia,serif;letter-spacing:-.055em;margin:0;color:inherit;overflow-wrap:break-word;max-width:100%}
@@ -1126,6 +1127,7 @@ Remplis FIREBASE_API_KEY, FIREBASE_DB_URL et PROXY_URL tout en haut du code de i
 <div id="app" hidden>
   <aside id="side" class="glass"></aside>
   <div id="mainCol">
+    <section id="ad-gate" class="view" hidden></section>
     <section id="v-library" class="view"></section>
     <section id="v-stats" class="view" hidden></section>
     <section id="v-ai" class="view" hidden></section>
@@ -2752,6 +2754,7 @@ function buildShell() {
 function go(tab, fromBack = false) {
   if (!S.store) return;
   const prev = S.tab;
+  if (adBreak.watch && adBreak.watch.tab !== tab) cancelUnlockAd();
   S.tab = tab;
   if (tab !== "community") stopNetworkView();
   for (const [t] of TABS) {
@@ -2759,7 +2762,7 @@ function go(tab, fromBack = false) {
     SIDE[t].classList.toggle("on", t === tab);
     TABBTN[t].classList.toggle("on", t === tab);
   }
-  $("fab").hidden = tab !== "library";
+  syncAdGate();
   if (tab !== "library" && !tabBack) { tabBack = onTabBack; pushBack(tabBack); }
   else if (tab === "library" && tabBack && !fromBack) { const f = tabBack; tabBack = null; dropBack(f); }
   if (tab === "library") render();
@@ -3156,6 +3159,7 @@ function openSearch({ kind, mode = "add", query = "" }) {
   });
 }
 async function addItem(kind = S.kind, query = "") {
+  if (isAdLocked("library")) { go("library"); return; }
   if (!S.store) return;
   const res = await openSearch({ kind, mode: "add", query });
   if (res && res.manual != null) openItemDialog({ kind: res.kind || kind, initialName: res.manual });
@@ -3253,6 +3257,7 @@ function forgetRemoteCover(name) {
 // ================================================================ fiche
 async function openDetail(id) {
   await settle();
+  if (isAdLocked("library")) { go("library"); return; }
   const st = S.store;
   if (!st || !st.get(id)) return;
   const body = el("div");
@@ -3996,7 +4001,7 @@ function renderAI() {
   }
   const msgs = S.ai.msgs, chat = el("div", { class: "chat" });
   A.chat = chat;
-  if (!aiReady()) chat.append(el("div", { class: "banner" }, icon("info", 20), el("div", { class: "grow", text: "Choisis une IA et colle ta clé API : bouton en haut à droite." })));
+  if (!adBreak.event && !aiReady()) chat.append(el("div", { class: "banner" }, icon("info", 20), el("div", { class: "grow", text: "Choisis une IA et colle ta clé API : bouton en haut à droite." })));
   if (!msgs.length) chat.append(helloBlock());
   const from = A.seen < 0 ? msgs.length : A.seen;
   msgs.forEach((m, i) => {
@@ -4330,21 +4335,30 @@ async function askAI(text) {
   text = String(text || "").trim();
   if (!text || S.ai.busy || !S.store) return;
   if (!S.prefs.aiOn) { toast(`${AI_NAME} est désactivé (Réglages).`); return; }
- if (!aiReady()) { openAiPicker(); return; }
+  const troll = !!adBreak.event;
+  if (!troll && !aiReady()) { openAiPicker(); return; }
   if (!A.cur) loadAI();
   const myGen = gen, ai = S.ai, conv = A.cur, first = !ai.msgs.length;
-  ai.msgs.push({ role: "user", content: text.slice(0, 2000) });
+  const question = { role: "user", content: text.slice(0, 2000) };
+  ai.msgs.push(question);
   const bot = { role: "assistant", content: "" };
   ai.msgs.push(bot);
   conv.updated = Date.now();
   if (first && conv.auto) conv.title = shortTitle(text);
-  ai.busy = true;
   A.showList = false;
+  if (troll) {
+    question.troll = bot.troll = true;
+    bot.content = trollReplies[adBreak.reply++ % trollReplies.length];
+    saveAI();
+    if (S.tab === "ai") { renderAI(); scrollChat(true); }
+    return;
+  }
+  ai.busy = true;
   const ctrl = new AbortController();
   ai.ctrl = ctrl;
   if (S.tab === "ai") { renderAI(); scrollChat(true); }
   try {
-    const hist = ai.msgs.slice(0, -1).filter((m) => m.content && !m.error).slice(-12).map((m) => ({ role: m.role, content: m.content.slice(0, 3000) }));
+    const hist = ai.msgs.slice(0, -1).filter((m) => m.content && !m.error && !m.troll).slice(-12).map((m) => ({ role: m.role, content: m.content.slice(0, 3000) }));
     hist[hist.length - 1].content += exclusionNote(text);
     const convo = [{ role: "system", content: aiSystem() }, ...hist];
     await streamAI(convo, bot, ctrl.signal);
@@ -4418,7 +4432,7 @@ function stopNetworkView() {
 
 function stopSocial() {
   stopNetworkView();
-  closeAdScreen();
+  cancelUnlockAd();
   Object.assign(adBreak, { event: null, known: false, progress: null, busy: false, error: "" });
   social.adminUid = null;
   social.catalog = {};
@@ -4848,7 +4862,13 @@ function adminCatalog(host) {
   return () => socialEvents.removeEventListener("catalog", draw);
 }
 
-const AD_DURATION_MS = 4000, AD_PAUSE_MS = 4000;
+const AD_DURATION_MS = 4000, AD_PAUSE_MS = 4000, AD_UNLOCK_MS = 60000;
+const trollReplies = [
+  "Oui, super. T’as vu la tondeuse qui coupe le soleil ? Depuis ce matin, on a deux demi-journées.",
+  "Je t’écoute. Enfin, mon grille-pain t’écoute. Il dit que ton idée est presque dorée.",
+  "Une seconde, mon escargot vient de se faire flasher à trois feuilles par heure.",
+  "J’ai demandé à la lune. Elle préfère qu’on lui écrive après le coucher du soleil.",
+];
 // Chaque planche contient deux rangées de trois photos, dans l’ordre du catalogue.
 const spoofAds = [
   ["Pseudo en direct","Abonne-toi. Ou pas.","« Encore toi ? » Pseudo a désactivé les commentaires pour pouvoir te couper la parole.", "#dbc3ef"],
@@ -4875,8 +4895,47 @@ const spoofAds = [
   ["Chaussons connectés","Pantoufle filaire","Le confort de marcher chez toi. Dans un rayon de deux mètres.", "#d9ed9a"],
   ["Galerie de nouilles","Spaghetti sur toile","Œuvre unique. L’artiste a mangé tout le reste de l’exposition.", "#a9e6de"],
   ["Jardinerie nocturne","Disco en pot","Arrose le samedi soir. Au printemps, la plante recrute un DJ.", "#e7bdf0"],
+  ["Jardinage solaire","La tondeuse Hélios","Coupe le soleil à ras. Le bac contient déjà trois couchers de soleil.", "#ffd46c", "☀️"],
+  ["Réseau sous-marin","Wi-Fi Sardine","Le mot de passe est sous la boîte. Tourne-la doucement, tout le banc est connecté.", "#a7dfef", "🐟"],
+  ["Traiteur du bureau","Imprimante à crêpes","Bourrage papier ? Ajoute du sirop et sers la pile encore chaude.", "#ffd5a4", "🥞"],
+  ["Agence lunaire","Lune de secours","Ta nuit est trop sombre ? Dévisse la vieille lune et garde le ticket.", "#d8cdf6", "🌙"],
+  ["Bagagerie céleste","Nuage cabine","Dix kilos de brouillard en bagage à main. En cas de surcharge, il pleut.", "#b3e3ef", "☁️"],
+  ["Horlogerie potagère","Minute radis","Plante ton minuteur. Quand ça sonne, la salade est prête.", "#ffc1bb", "⏲️"],
 ];
-const adBreak = { event: null, known: false, progress: null, timer: 0, dialog: null, busy: false, error: "" };
+const adBreak = { watch: null, reply: 0, event: null, known: false, progress: null, timer: 0, dialog: null, busy: false, error: "" };
+
+function isAdLocked(tab) {
+  return !!adBreak.event && tab !== "ai" && !adBreak.progress?.unlocked?.includes(tab);
+}
+
+function syncAdGate() {
+  const tab = S.tab, locked = isAdLocked(tab);
+  const gate = $("ad-gate");
+  gate.hidden = !locked;
+  $("v-" + tab).hidden = locked;
+  $("fab").hidden = tab !== "library" || locked;
+  if (!locked) { gate.replaceChildren(); return; }
+  const [, label, glyph] = TABS.find(([key]) => key === tab);
+  gate.replaceChildren(viewHead({ title: label, me: false }), el("div", { class: "vbody" },
+    emptyBlock(glyph, "Rubrique verrouillée", "Regarde une pub de 1 minute pour déverrouiller cette rubrique jusqu’à la fin du troll.",
+      "Regarder la pub · 1 min", () => startUnlockAd(tab))));
+  gate.querySelector("button").dataset.adControl = "";
+}
+
+function saveAdProgress() {
+  try { sessionStorage.setItem("orbit-ad-break:" + S.uid, JSON.stringify(adBreak.progress)); } catch { /* Onglet privé. */ }
+}
+
+function startUnlockAd(tab) {
+  if (!isAdLocked(tab) || S.tab !== tab || adBreak.dialog || !adBreak.progress) return;
+  adBreak.watch = { tab, remaining: AD_UNLOCK_MS, since: null };
+  syncAdScreen();
+}
+
+function cancelUnlockAd() {
+  adBreak.watch = null;
+  closeAdScreen();
+}
 
 function closeAdScreen() {
   clearTimeout(adBreak.timer);
@@ -4909,13 +4968,13 @@ async function toggleAdBreak() {
   }
 }
 
-function showAdScreen(slot) {
-  const title = el("h2", { id: "ad-break-title", text: "La coupure pub" });
+function showAdScreen(slot, watch) {
+  const title = el("h2", { id: "ad-break-title", text: watch ? "Déverrouiller · " + TAB_SHORT[watch.tab] : "La coupure pub" });
   const trail = el("span", { class: "ad-timing", text: "Coupure de 4 s" });
   const stop = el("button", { type: "button", class: "ad-stop", text: "Arrêter pour tout le monde", onclick: toggleAdBreak });
   const status = el("div", { class: "ad-notice", role: "status" });
   const dialog = el("dialog", { class: "ad-break", "aria-labelledby": title.id },
-    el("header", { class: "ad-header" }, title, trail, stop), status, el("div", { class: "ad-stage" }));
+    el("header", { class: "ad-header" }, title, trail, watch && el("button", { class: "ad-stop", type: "button", text: "Annuler", onclick: cancelUnlockAd }), stop), status, el("div", { class: "ad-stage" }));
   function controls() {
     stop.hidden = !isModerator();
     stop.disabled = !S.connected || adBreak.busy;
@@ -4927,29 +4986,57 @@ function showAdScreen(slot) {
   dialog.addEventListener("close", () => {
     for (const name of ["role","connection","ad-break"]) socialEvents.removeEventListener(name, controls);
   }, { once: true });
-  dialog.addEventListener("cancel", e => e.preventDefault());
+  dialog.addEventListener("cancel", e => { e.preventDefault(); if (watch) cancelUnlockAd(); });
   // Les raccourcis des écrans Orbit sous la diffusion restent inactifs.
   dialog.addEventListener("keydown", e => e.stopPropagation());
   document.body.append(dialog);
   adBreak.dialog = dialog;
-  const [brand, headline, copy, color] = spoofAds[slot];
-  const art = el("div", { class: "ad-art ad-sheet-" + Math.floor(slot / 6), "aria-hidden": "true",
+  dialog.showModal();
+  drawAdPoster(dialog, slot);
+}
+
+function drawAdPoster(dialog, slot) {
+  dialog.dataset.slot = String(slot);
+  const [brand, headline, copy, color, emblem] = spoofAds[slot];
+  const art = emblem ? el("div", { class: "ad-art ad-emblem", "aria-hidden": "true", text: emblem }) : el("div", { class: "ad-art ad-sheet-" + Math.floor(slot / 6), "aria-hidden": "true",
     style: "background-position:" + (slot % 3 * 50) + "% " + (Math.floor(slot / 3) % 2 * 100) + "%" });
   const stage = dialog.querySelector(".ad-stage");
   stage.style.setProperty("--paper", color);
-  stage.append(el("article", { class: "ad-poster" }, art, el("div", { class: "ad-content" },
+  stage.replaceChildren(el("article", { class: "ad-poster" }, art, el("div", { class: "ad-content" },
     el("p", { class: "ad-brand", text: brand }), el("h3", { text: headline }), el("p", { class: "ad-copy", text: copy }))));
-  dialog.showModal();
 }
 
 function syncAdScreen() {
   clearTimeout(adBreak.timer);
   const progress = adBreak.progress;
+  const watch = adBreak.watch;
+  if (watch && progress) {
+    const now = performance.now();
+    if (watch.since !== null) watch.remaining -= now - watch.since;
+    watch.since = document.hidden ? null : now;
+    if (watch.remaining <= 0) {
+      progress.unlocked = [...(progress.unlocked || []), watch.tab];
+      progress.endsAt = Date.now();
+      saveAdProgress();
+      cancelUnlockAd();
+      syncAdGate();
+      return;
+    }
+    const slot = (parseInt(progress.id.slice(-6), 16) + progress.turn + Math.floor((AD_UNLOCK_MS - watch.remaining) / 10000)) % spoofAds.length;
+    if (!adBreak.dialog) showAdScreen(slot, watch);
+    const dialog = adBreak.dialog;
+    if (dialog.dataset.slot !== String(slot)) {
+      drawAdPoster(dialog, slot);
+    }
+    dialog.querySelector(".ad-timing").textContent = Math.ceil(watch.remaining / 1000) + " s restantes";
+    if (!document.hidden) adBreak.timer = setTimeout(syncAdScreen, Math.min(1000, watch.remaining));
+    return;
+  }
   if (!progress || progress.endsAt <= Date.now()) { closeAdScreen(); return; }
   if (!adBreak.dialog) {
     const seed = parseInt(progress.id.slice(-6), 16);
-    // Chacun des deux pas parcourt les 24 affiches avant de revenir à la première.
-    showAdScreen((seed + progress.turn * (seed % 2 ? 5 : 7)) % spoofAds.length);
+    // 7 et 11 sont premiers avec les 30 affiches du catalogue.
+    showAdScreen((seed + progress.turn * (seed % 2 ? 11 : 7)) % spoofAds.length);
   }
   adBreak.timer = setTimeout(syncAdScreen, Math.max(1, progress.endsAt - Date.now()));
 }
@@ -4958,8 +5045,8 @@ function startAdBreak(session) {
   const key = "orbit-ad-break:" + S.uid;
   let pendingClick = 0;
   function beginAd(id, turn) {
-    adBreak.progress = { id, turn, endsAt: Date.now() + AD_DURATION_MS };
-    try { sessionStorage.setItem(key, JSON.stringify(adBreak.progress)); } catch { /* Onglet privé. */ }
+    adBreak.progress = { id, turn, endsAt: Date.now() + AD_DURATION_MS, unlocked: adBreak.progress?.unlocked || [] };
+    saveAdProgress();
     syncAdScreen();
   }
   function receive(event, known) {
@@ -4969,16 +5056,19 @@ function startAdBreak(session) {
     adBreak.known = known;
     if (previous !== adBreak.event?.id) {
       clearTimeout(pendingClick);
-      closeAdScreen();
+      cancelUnlockAd();
+      adBreak.reply = 0;
       adBreak.progress = null;
       if (adBreak.event) {
         let saved;
         try { saved = JSON.parse(sessionStorage.getItem(key)); } catch { /* Premier affichage. */ }
         if (saved?.id === event.id && Number.isSafeInteger(saved.turn) && saved.turn >= 0 && Number.isFinite(saved.endsAt)) {
-          adBreak.progress = saved;
+          adBreak.progress = { ...saved, unlocked: Array.isArray(saved.unlocked) ? saved.unlocked : [] };
           syncAdScreen();
         } else beginAd(event.id, 0);
       }
+      syncAdGate();
+      if (S.tab === "ai") renderAI();
     }
     socialEvents.dispatchEvent(new Event("ad-break"));
   }
@@ -4990,7 +5080,7 @@ function startAdBreak(session) {
     // Laisser le clic ouvrir la fiche ou changer d’onglet avant de la recouvrir.
     clearTimeout(pendingClick);
     pendingClick = setTimeout(() => {
-      if (session === gen && adBreak.progress === current && !adBreak.busy) beginAd(current.id, current.turn + 1);
+      if (session === gen && adBreak.progress === current && !adBreak.watch && !isAdLocked(S.tab) && !adBreak.busy) beginAd(current.id, current.turn + 1);
     }, 0);
   }
   unsubs.push(onValue(socialPath("adBreak"), snap => receive(snap.val(), true), () => receive(null, false)));
@@ -5009,7 +5099,7 @@ function adminAdBreak(host) {
   button.dataset.adControl = "";
   function draw() {
     state.textContent = adBreak.error || (!adBreak.known ? "Coupure pub indisponible. Vérifie la connexion et les règles Firebase." :
-      adBreak.event ? "Diffusion en cours." : "24 fausses pubs de 4 secondes. Après chaque pub, les membres ont 4 secondes pour explorer. Le clic suivant lance une autre pub.");
+      adBreak.event ? "Diffusion en cours." : `${spoofAds.length} fausses pubs de 4 secondes. Chaque rubrique demande une minute de pub et l’IA répond de travers.`);
     button.textContent = adBreak.event ? "Arrêter pour tout le monde" : "Lancer la coupure pub";
     button.disabled = adBreak.busy || !adBreak.known || !S.connected || !isModerator();
   }
